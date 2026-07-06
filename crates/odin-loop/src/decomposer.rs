@@ -193,8 +193,8 @@ mod tests {
         let mut plan = decomposer.decompose_heuristic("Test goal");
         assert!(!decomposer.all_complete(&plan));
 
-        for task in plan.sub_tasks.iter() {
-            let id = task.id.clone();
+        let ids: Vec<String> = plan.sub_tasks.iter().map(|t| t.id.clone()).collect();
+        for id in ids {
             GoalDecomposer::complete_task(&mut plan, &id, Some("Done".into()));
         }
         assert!(decomposer.all_complete(&plan));
