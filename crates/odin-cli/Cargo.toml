@@ -1,0 +1,24 @@
+[package]
+name = "odin-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "odin"
+path = "src/main.rs"
+
+[dependencies]
+odin-core.workspace = true
+odin-runtime.workspace = true
+odin-gateway = { workspace = true }
+clap.workspace = true
+serde.workspace = true
+serde_yaml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+anyhow = "1"
+shellexpand = "3"

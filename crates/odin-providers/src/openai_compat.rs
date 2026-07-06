@@ -1,0 +1,314 @@
+//! OpenAI-compatible provider (works with OpenAI, Ollama, vLLM, Groq, DeepSeek, etc.)
+
+use async_trait::async_trait;
+use odin_core::error::{OdinError, OdinResult};
+use odin_core::traits::{ChatStream, Provider};
+use odin_core::types::*;
+use reqwest::Client;
+use serde_json::Value;
+use std::pin::Pin;
+use std::task::{Context as TaskContext, Poll};
+use futures::Stream;
+
+/// Provider for any OpenAI-compatible API endpoint.
+pub struct OpenAiCompatProvider {
+    name: String,
+    client: Client,
+    base_url: String,
+    api_key: Option<String>,
+}
+
+impl OpenAiCompatProvider {
+    pub fn new(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            client: Client::new(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            api_key,
+        }
+    }
+
+    fn chat_url(&self) -> String {
+        format!("{}/chat/completions", self.base_url)
+    }
+
+    fn models_url(&self) -> String {
+        format!("{}/models", self.base_url)
+    }
+
+    fn build_request(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        options: &CompletionOptions,
+    ) -> Value {
+        let messages_json: Vec<Value> = messages
+            .iter()
+            .map(|m| {
+                let mut map = serde_json::Map::new();
+                map.insert("role".into(), serde_json::to_value(m.role.to_string()).unwrap());
+
+                match &m.content {
+                    MessageContent::Text { content } => {
+                        map.insert("content".into(), Value::String(content.clone()));
+                    }
+                    MessageContent::ToolCalls {
+                        content,
+                        tool_calls,
+                    }
+                    | MessageContent::AssistantWithTools {
+                        content,
+                        tool_calls,
+                    } => {
+                        if let Some(c) = content {
+                            map.insert("content".into(), Value::String(c.clone()));
+                        }
+                        if !tool_calls.is_empty() {
+                            let tc_json: Vec<Value> = tool_calls
+                                .iter()
+                                .map(|tc| {
+                                    serde_json::json!({
+                                        "id": tc.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tc.function.name,
+                                            "arguments": tc.function.arguments,
+                                        }
+                                    })
+                                })
+                                .collect();
+                            map.insert("tool_calls".into(), Value::Array(tc_json));
+                        }
+                    }
+                }
+
+                if let Some(ref name) = m.name {
+                    map.insert("name".into(), Value::String(name.clone()));
+                }
+                if let Some(ref tci) = m.tool_call_id {
+                    map.insert("tool_call_id".into(), Value::String(tci.clone()));
+                }
+
+                Value::Object(map)
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "messages": messages_json,
+        });
+
+        if !tools.is_empty() {
+            let tools_json: Vec<Value> = tools
+                .iter()
+                .map(|t| serde_json::json!({
+                    "type": "function",
+                    "function": t.function,
+                }))
+                .collect();
+            body["tools"] = Value::Array(tools_json);
+        }
+
+        if let Some(temp) = options.temperature {
+            body["temperature"] = Value::Number(serde_json::Number::from_f64(temp).unwrap());
+        }
+        if let Some(mt) = options.max_tokens {
+            body["max_tokens"] = Value::Number(mt.into());
+        }
+        if let Some(tp) = options.top_p {
+            body["top_p"] = Value::Number(serde_json::Number::from_f64(tp).unwrap());
+        }
+
+        body
+    }
+}
+
+#[async_trait]
+impl Provider for OpenAiCompatProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    async fn list_models(&self) -> OdinResult<Vec<ModelInfo>> {
+        let mut req = self.client.get(&self.models_url());
+        if let Some(ref key) = self.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let resp = req.send().await.map_err(|e| {
+            OdinError::provider(&self.name, format!("Failed to list models: {}", e))
+        })?;
+
+        let json: Value = resp.json().await.map_err(|e| {
+            OdinError::provider(&self.name, format!("Invalid models response: {}", e))
+        })?;
+
+        let models = json["data"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|m| ModelInfo {
+                        id: m["id"].as_str().unwrap_or("unknown").to_string(),
+                        provider: self.name.clone(),
+                        context_length: 32768,
+                        supports_tools: true,
+                        supports_vision: false,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(models)
+    }
+
+    async fn chat(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        options: &CompletionOptions,
+    ) -> OdinResult<ChatResponse> {
+        let body = self.build_request(model, messages, tools, options);
+
+        let mut req = self.client.post(&self.chat_url()).json(&body);
+        if let Some(ref key) = self.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let resp = req.send().await.map_err(|e| {
+            OdinError::provider(&self.name, format!("Chat request failed: {}", e))
+        })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(OdinError::provider(
+                &self.name,
+                format!("HTTP {}: {}", status.as_u16(), text),
+            ));
+        }
+
+        let json: Value = resp.json().await.map_err(|e| {
+            OdinError::provider(&self.name, format!("Invalid chat response: {}", e))
+        })?;
+
+        let choice = &json["choices"][0];
+        let msg = &choice["message"];
+
+        let content = msg["content"].as_str().map(|s| s.to_string());
+        let tool_calls: Vec<ToolCall> = msg["tool_calls"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .map(|tc| ToolCall {
+                        id: tc["id"].as_str().unwrap_or("").to_string(),
+                        call_type: "function".to_string(),
+                        function: FunctionCall {
+                            name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                            arguments: tc["function"]["arguments"].as_str().unwrap_or("{}").to_string(),
+                        },
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let message = if !tool_calls.is_empty() {
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::ToolCalls {
+                    content,
+                    tool_calls,
+                },
+                name: None,
+                tool_call_id: None,
+            }
+        } else {
+            Message::assistant(content.unwrap_or_default())
+        };
+
+        let usage = json["usage"].as_object().map_or(TokenUsage::default(), |u| {
+            TokenUsage {
+                prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+                completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
+                total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
+            }
+        });
+
+        Ok(ChatResponse {
+            message,
+            usage,
+            finish_reason: choice["finish_reason"].as_str().map(|s| s.to_string()),
+            model: json["model"].as_str().unwrap_or(model).to_string(),
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        _model: &str,
+        _messages: &[Message],
+        _tools: &[ToolSchema],
+        _options: &CompletionOptions,
+    ) -> OdinResult<Box<dyn ChatStream>> {
+        // Streaming not yet implemented; fall back to non-streaming
+        Err(OdinError::provider(
+            &self.name,
+            "Streaming not yet implemented",
+        ))
+    }
+
+    async fn health_check(&self) -> OdinResult<bool> {
+        match self.list_models().await {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_provider_name() {
+        let provider = OpenAiCompatProvider::new("test", "http://localhost:11434/v1", None);
+        assert_eq!(provider.name(), "test");
+    }
+
+    #[test]
+    fn test_build_request_basic() {
+        let provider = OpenAiCompatProvider::new("test", "http://localhost:11434/v1", None);
+        let messages = vec![Message::user("Hello")];
+        let body = provider.build_request("llama3", &messages, &[], &CompletionOptions::default());
+
+        assert_eq!(body["model"], "llama3");
+        assert_eq!(body["messages"][0]["role"], "user");
+        assert_eq!(body["messages"][0]["content"], "Hello");
+    }
+
+    #[test]
+    fn test_build_request_with_tools() {
+        let provider = OpenAiCompatProvider::new("test", "http://localhost:11434/v1", None);
+        let schema = ToolSchema {
+            schema_type: "function".into(),
+            function: FunctionSchema {
+                name: "test_tool".into(),
+                description: "A test tool".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+        };
+        let body = provider.build_request(
+            "gpt-4",
+            &[Message::user("Use the tool")],
+            &[schema],
+            &CompletionOptions::default(),
+        );
+
+        assert!(body["tools"].is_array());
+        assert_eq!(body["tools"][0]["function"]["name"], "test_tool");
+    }
+}

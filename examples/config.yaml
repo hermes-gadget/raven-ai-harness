@@ -1,0 +1,97 @@
+# Raven AI Harness — Example Configuration
+# Copy to ~/.odin/config.yaml and customize
+
+general:
+  instance_name: raven
+  log_level: info
+  debug: false
+
+models:
+  # The default provider for most operations
+  default_provider: openai_compat
+  default_model: gpt-4o-mini
+
+  # Optional: specific models for different phases
+  # planning_model: gpt-4o-mini  # Cheaper model for planning
+  # critique_model: gpt-4o-mini  # Model for self-evaluation
+  # escalation_model: gpt-4o    # Stronger model for hard problems
+
+  providers:
+    # OpenAI-compatible API (works with OpenAI, Ollama, vLLM, Groq, DeepSeek, etc.)
+    openai_compat:
+      provider_type: openai_compat
+      base_url: https://api.openai.com/v1
+      api_key_env: OPENAI_API_KEY
+      timeout_secs: 120
+      max_retries: 3
+
+    # Anthropic Claude
+    # anthropic:
+    #   provider_type: anthropic
+    #   api_key_env: ANTHROPIC_API_KEY
+
+    # Local model via Ollama
+    # local:
+    #   provider_type: openai_compat
+    #   base_url: http://localhost:11434/v1
+
+agent:
+  max_iterations: 100
+  max_tool_calls_per_turn: 10
+  confidence_threshold: 0.5   # Escalate below this
+  max_retries: 3
+  enable_decomposition: true   # Break complex goals into sub-tasks
+  enable_summarization: true   # Compress context for long sessions
+  context_limit: 32768         # Token limit before compression
+  compression_ratio: 0.5       # Compress to 50% of limit
+
+tools:
+  enabled:
+    - file_read
+    - file_write
+    - shell
+    - web_search
+    - web_fetch
+    - git
+  default_timeout_secs: 60
+  sandbox_enabled: false
+  path_boundary:
+    allowed_read:
+      - "."
+      - "/tmp"
+    allowed_write:
+      - "."
+      - "/tmp"
+    denied:
+      - "/etc/passwd"
+      - "/etc/shadow"
+      - "~/.ssh"
+
+memory:
+  enabled: true
+  max_entries: 1000
+  save_interval_secs: 300
+
+safety:
+  require_approval: true
+  max_rate_per_minute: 60
+  dangerous_commands:
+    - "rm\\s+-rf"
+    - "git\\s+reset\\s+--hard"
+    - "git\\s+push\\s+--force"
+    - "sudo\\s+"
+    - "chmod\\s+777"
+
+audit:
+  enabled: true
+  json_format: false
+
+gateway:
+  http_enabled: false
+  http_addr: "127.0.0.1:9177"
+  discord_enabled: false
+
+scheduler:
+  enabled: false
+  check_interval_secs: 30
+  max_concurrent: 5

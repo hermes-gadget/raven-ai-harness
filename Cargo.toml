@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/odin-core",
+    "crates/odin-runtime",
+    "crates/odin-loop",
+    "crates/odin-providers",
+    "crates/odin-tools",
+    "crates/odin-memory",
+    "crates/odin-scheduler",
+    "crates/odin-permissions",
+    "crates/odin-audit",
+    "crates/odin-gateway",
+    "crates/odin-skills",
+    "crates/odin-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/hermes-gadget/raven-ai-harness"
+authors = ["Raven Contributors"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.8"
+directories = "6"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+strum = { version = "0.27", features = ["derive"] }
+strum_macros = "0.27"
+dashmap = "6"
+parking_lot = "0.12"
+futures = "0.3"
+tower = { version = "0.5", features = ["util"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tempfile = "3"
+rstest = "0.24"
+criterion = { version = "0.5", features = ["html_reports"] }
+mockall = "0.13"
+wiremock = "0.6"
+pretty_assertions = "1"
+regex = "1"
+sha2 = "0.10"
+hmac = "0.12"
+jsonwebtoken = "9"
+base64 = "0.22"
+url = "2"
+mime = "0.3"
+percent-encoding = "2"
+bytes = "1"
+pin-project-lite = "0.2"
+arc-swap = "1"
+
+# Odin internal crates
+odin-core = { path = "crates/odin-core" }
+odin-runtime = { path = "crates/odin-runtime" }
+odin-loop = { path = "crates/odin-loop" }
+odin-providers = { path = "crates/odin-providers" }
+odin-tools = { path = "crates/odin-tools" }
+odin-memory = { path = "crates/odin-memory" }
+odin-scheduler = { path = "crates/odin-scheduler" }
+odin-permissions = { path = "crates/odin-permissions" }
+odin-audit = { path = "crates/odin-audit" }
+odin-gateway = { path = "crates/odin-gateway" }
+odin-skills = { path = "crates/odin-skills" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.bench]
+debug = false
+opt-level = 3
