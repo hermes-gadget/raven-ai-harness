@@ -12,7 +12,7 @@ members = [
     "crates/odin-audit",
     "crates/odin-gateway",
     "crates/odin-skills",
-    "crates/odin-cli",
+    "crates/odin-cli", "crates/odin-baseline",
 ]
 
 [workspace.package]

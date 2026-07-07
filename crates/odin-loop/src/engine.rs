@@ -125,13 +125,16 @@ impl LoopEngineTrait for Engine {
                 break;
             }
 
-            // ── PLAN ── (only on first iteration or after retry)
-            if state.current_phase == LoopPhase::Plan || state.iteration == 1 {
+            // ── PLAN ── (only on first iteration — decomposition is done once)
+            if state.iteration == 1 {
                 let result = plan_phase.execute(&mut state, &context).await?;
                 last_confidence = result.confidence;
                 if result.decision == LoopDecision::Stop {
                     break;
                 }
+                // After planning, go straight to ACT
+                state.current_phase = LoopPhase::Act;
+                continue;
             }
 
             // ── ACT ──
@@ -194,7 +197,7 @@ impl LoopEngineTrait for Engine {
                                 }
                             }
 
-                            state.current_phase = LoopPhase::Plan;
+                            state.current_phase = LoopPhase::Act;
                             continue;
                         }
                     }

@@ -1,5 +1,5 @@
 [package]
-name = "odin-loop"
+name = "odin-baseline"
 version.workspace = true
 edition = "2024"
 license.workspace = true
@@ -11,12 +11,5 @@ serde_json.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
-thiserror.workspace = true
 chrono.workspace = true
 uuid.workspace = true
-parking_lot.workspace = true
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-odin-baseline = { path = "../odin-baseline" }
-rand = "0.8"
