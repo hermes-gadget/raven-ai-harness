@@ -266,11 +266,7 @@ impl Phase for ActPhase {
                                         if let Some(cmd) =
                                             args.get("command").and_then(|v| v.as_str())
                                         {
-                                            if policy.is_dangerous_command(cmd) {
-                                                true
-                                            } else {
-                                                false
-                                            }
+                                            policy.is_dangerous_command(cmd)
                                         } else {
                                             false
                                         }

@@ -51,11 +51,6 @@ impl SecretManager {
         }
     }
 
-    /// Create a new secret manager with default settings.
-    pub fn default() -> Self {
-        Self::new(true)
-    }
-
     /// Store a secret value.
     pub async fn set_secret(
         &self,
@@ -189,6 +184,12 @@ impl SecretManager {
         } else {
             Ok(value.to_string())
         }
+    }
+}
+
+impl Default for SecretManager {
+    fn default() -> Self {
+        Self::new(true)
     }
 }
 

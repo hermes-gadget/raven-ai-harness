@@ -461,9 +461,11 @@ mod tests {
         let tmp_dir = std::env::temp_dir();
         let log_path = tmp_dir.join(format!("audit_test_{}.jsonl", Uuid::new_v4()));
 
-        let mut config = AuditLoggerConfig::default();
-        config.file_path = Some(log_path.clone());
-        config.json_format = true;
+        let config = AuditLoggerConfig {
+            file_path: Some(log_path.clone()),
+            json_format: true,
+            ..AuditLoggerConfig::default()
+        };
 
         let logger = AuditLoggerImpl::new(config);
         let agent_id = Uuid::new_v4();

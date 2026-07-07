@@ -64,11 +64,6 @@ impl ApprovalGate {
         }
     }
 
-    /// Create a new approval gate with default settings (no auto-approve, 30s timeout).
-    pub fn default() -> Self {
-        Self::new(false, 30)
-    }
-
     /// Submit a new approval request.
     ///
     /// Returns the request ID.
@@ -207,6 +202,12 @@ impl ApprovalGate {
             debug!(count = cleaned, "Cleaned up expired approval requests");
         }
         cleaned
+    }
+}
+
+impl Default for ApprovalGate {
+    fn default() -> Self {
+        Self::new(false, 30)
     }
 }
 

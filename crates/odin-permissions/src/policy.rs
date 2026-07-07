@@ -106,26 +106,6 @@ impl PolicyEngine {
         }
     }
 
-    /// Create a policy engine with default safe settings.
-    pub fn default() -> Self {
-        Self::new(
-            vec![],
-            &[
-                r"rm\s+-rf".into(),
-                r"git\s+reset\s+--hard".into(),
-                r"git\s+push\s+--force".into(),
-                r"sudo\s+".into(),
-                r"chmod\s+777".into(),
-                r">\s*/dev/".into(),
-                r"mkfs\.".into(),
-                r"dd\s+if=".into(),
-            ],
-            PathBoundary::default(),
-            60,
-            true,
-        )
-    }
-
     /// Check if a shell command matches any dangerous pattern.
     pub fn is_dangerous_command(&self, command: &str) -> bool {
         self.dangerous_patterns
@@ -172,6 +152,27 @@ impl PolicyEngine {
         }
 
         Ok(())
+    }
+}
+
+impl Default for PolicyEngine {
+    fn default() -> Self {
+        Self::new(
+            vec![],
+            &[
+                r"rm\s+-rf".into(),
+                r"git\s+reset\s+--hard".into(),
+                r"git\s+push\s+--force".into(),
+                r"sudo\s+".into(),
+                r"chmod\s+777".into(),
+                r">\s*/dev/".into(),
+                r"mkfs\.".into(),
+                r"dd\s+if=".into(),
+            ],
+            PathBoundary::default(),
+            60,
+            true,
+        )
     }
 }
 

@@ -32,6 +32,7 @@ struct DeepSeekProvider {
     total_prompt_tokens: std::sync::atomic::AtomicU32,
     total_completion_tokens: std::sync::atomic::AtomicU32,
     /// Per-request timeout
+    #[allow(dead_code)]
     request_timeout: std::time::Duration,
 }
 
@@ -268,6 +269,7 @@ fn load_api_key() -> Option<String> {
 }
 
 #[derive(Debug, serde::Serialize)]
+#[allow(dead_code)]
 struct LiveRun {
     agent: String,
     task: String,
