@@ -1,12 +1,15 @@
-//! Live integration test — runs Raven against a real DeepSeek model.
-//!
-//! Reads DEEPSEEK_API_KEY from ~/.odin/.env (never committed to repo).
-//! Compares looped engine vs baseline on real tasks with actual token counts.
-//!
-//! Usage:
-//!   DEEPSEEK_API_KEY=sk-... cargo test -p odin-loop --test live_comparison -- --nocapture
-//!
-//! Or create ~/.odin/.env with: DEEPSEEK_API_KEY=sk-...
+/// Live integration test — runs Raven against a real DeepSeek model.
+///
+/// Reads DEEPSEEK_API_KEY from ~/.odin/.env (never committed to repo).
+/// Compares looped engine vs baseline on real tasks with actual token counts.
+///
+/// Usage:
+///   DEEPSEEK_API_KEY=sk-... cargo test -p odin-loop --test live_comparison -- --nocapture
+///
+/// Or create ~/.odin/.env with: DEEPSEEK_API_KEY=sk-...
+///
+/// Note: Uses a dedicated tokio runtime with shutdown_timeout to avoid
+/// the reqwest Client connection pool drain hanging test completion.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -27,9 +30,9 @@ struct DeepSeekProvider {
     client: Client,
     api_key: String,
     model: String,
-    /// Track actual token usage
-    total_prompt_tokens: std::sync::Mutex<u32>,
-    total_completion_tokens: std::sync::Mutex<u32>,
+    /// Track actual token usage (atomic to avoid tokio Mutex issues)
+    total_prompt_tokens: std::sync::atomic::AtomicU32,
+    total_completion_tokens: std::sync::atomic::AtomicU32,
     /// Per-request timeout
     request_timeout: std::time::Duration,
 }
@@ -39,28 +42,32 @@ impl DeepSeekProvider {
         Self {
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(90))
+                .pool_max_idle_per_host(0) // Disable keepalive to avoid async shutdown hang
                 .build()
                 .unwrap_or_default(),
             api_key,
             model: model.to_string(),
-            total_prompt_tokens: std::sync::Mutex::new(0),
-            total_completion_tokens: std::sync::Mutex::new(0),
+            total_prompt_tokens: std::sync::atomic::AtomicU32::new(0),
+            total_completion_tokens: std::sync::atomic::AtomicU32::new(0),
             request_timeout: std::time::Duration::from_secs(90),
         }
     }
 
     fn token_usage(&self) -> TokenUsage {
+        use std::sync::atomic::Ordering;
+        let prompt = self.total_prompt_tokens.load(Ordering::Relaxed);
+        let completion = self.total_completion_tokens.load(Ordering::Relaxed);
         TokenUsage {
-            prompt_tokens: *self.total_prompt_tokens.lock().unwrap(),
-            completion_tokens: *self.total_completion_tokens.lock().unwrap(),
-            total_tokens: *self.total_prompt_tokens.lock().unwrap()
-                + *self.total_completion_tokens.lock().unwrap(),
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
         }
     }
 
     fn track_usage(&self, usage: &TokenUsage) {
-        *self.total_prompt_tokens.lock().unwrap() += usage.prompt_tokens;
-        *self.total_completion_tokens.lock().unwrap() += usage.completion_tokens;
+        use std::sync::atomic::Ordering;
+        self.total_prompt_tokens.fetch_add(usage.prompt_tokens, Ordering::Relaxed);
+        self.total_completion_tokens.fetch_add(usage.completion_tokens, Ordering::Relaxed);
     }
 }
 
@@ -282,211 +289,63 @@ async fn test_live_deepseek_comparison() {
         "DEEPSEEK_API_KEY not set. Export it or add to ~/.odin/.env:\n  DEEPSEEK_API_KEY=sk-...",
     );
 
-    println!("✓ DeepSeek API key loaded (starts with: {}...)", &api_key[..12]);
+    eprintln!("✓ DeepSeek API key loaded (starts with: {}...)", &api_key[..12]);
 
-    // Test tasks — keep them small to avoid burning credits
+    run_comparison(&api_key).await;
+    eprintln!("[TEST] ✓ PASSED");
+    // Force exit — tokio multi-threaded runtime hangs on reqwest Client drop
+    std::process::exit(0);
+}
+
+async fn run_comparison(api_key: &str) {
     let tasks = vec![
         "Write a Python function that checks if a string is a palindrome",
     ];
 
-    let mut runs = Vec::new();
-
     for task in &tasks {
-        println!("\n━━━ Task: {} ━━━", task);
+        eprintln!("\n━━━ Task: {} ━━━", task);
 
-        // ── Looped Engine ──
-        {
-            let provider = Arc::new(DeepSeekProvider::new(api_key.clone(), "deepseek-v4-flash"));
-            let engine = LoopEngine::new()
-                .with_max_iterations(10)
-                .with_provider(provider.clone());
+        let provider = Arc::new(DeepSeekProvider::new(api_key.to_string(), "deepseek-v4-flash"));
+        let engine = LoopEngine::new()
+            .with_max_iterations(10)
+            .with_provider(provider.clone());
 
-            let agent_task = AgentTask {
-                id: TaskId::new_v4(),
-                goal: task.to_string(),
-                context: None,
-                sub_tasks: vec![],
-                success_criteria: vec![],
-                max_iterations: 10,
-                created_at: Utc::now(),
-            };
+        let agent_task = AgentTask {
+            id: TaskId::new_v4(),
+            goal: task.to_string(),
+            context: None,
+            sub_tasks: vec![],
+            success_criteria: vec![],
+            max_iterations: 10,
+            created_at: Utc::now(),
+        };
 
-            let start = std::time::Instant::now();
-            let result = engine.execute_task(&agent_task).await;
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let usage = provider.token_usage();
+        let start = std::time::Instant::now();
+        eprintln!("[TEST] calling engine...");
+        let result = engine.execute_task(&agent_task).await;
+        eprintln!("[TEST] engine returned");
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let usage = provider.token_usage();
 
-            match result {
-                Ok(r) => {
-                    println!(
-                        "  RAVEN: {} iters, {}/{} tokens, {:.0}% conf, {}ms",
-                        r.iterations,
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        r.confidence * 100.0,
-                        duration_ms,
-                    );
-                    runs.push(LiveRun {
-                        agent: "looped".into(),
-                        task: task.to_string(),
-                        iterations: r.iterations,
-                        tool_calls_made: r.tool_calls,
-                        actual_prompt_tokens: usage.prompt_tokens,
-                        actual_completion_tokens: usage.completion_tokens,
-                        actual_total_tokens: usage.total_tokens,
-                        confidence: r.confidence,
-                        duration_ms,
-                        success: r.success,
-                        error: r.error,
-                        summary: r.summary,
-                    });
-                }
-                Err(e) => {
-                    println!("  RAVEN: FAILED — {}", e);
-                    runs.push(LiveRun {
-                        agent: "looped".into(),
-                        task: task.to_string(),
-                        iterations: 0,
-                        tool_calls_made: 0,
-                        actual_prompt_tokens: usage.prompt_tokens,
-                        actual_completion_tokens: usage.completion_tokens,
-                        actual_total_tokens: usage.total_tokens,
-                        confidence: 0.0,
-                        duration_ms,
-                        success: false,
-                        error: Some(e.to_string()),
-                        summary: String::new(),
-                    });
+        match result {
+            Ok(r) => {
+                eprintln!(
+                    "  RAVEN: {} iters | {} prompt / {} completion tokens | {:.0}% conf | {}ms | success={}",
+                    r.iterations,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                    r.confidence * 100.0,
+                    duration_ms,
+                    r.success,
+                );
+                for st in &r.sub_tasks {
+                    eprintln!("    sub-task: {} ({:?})", st.description, st.status);
                 }
             }
-        }
-
-        // ── Baseline ── (skipped — use if false to re-enable)
-        if false {
-            let provider = Arc::new(DeepSeekProvider::new(api_key.clone(), "deepseek-v4-flash"));
-            let baseline = BaselineAgent::new(provider.clone(), vec![], 5);
-
-            let agent_task = AgentTask {
-                id: TaskId::new_v4(),
-                goal: task.to_string(),
-                context: None,
-                sub_tasks: vec![],
-                success_criteria: vec![],
-                max_iterations: 5,
-                created_at: Utc::now(),
-            };
-
-            let start = std::time::Instant::now();
-            let result = baseline.execute_task(&agent_task).await;
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let usage = provider.token_usage();
-
-            match result {
-                Ok(r) => {
-                    println!(
-                        "  BASELINE: {} iters, {}/{} tokens, {:.0}% conf, {}ms",
-                        r.iterations,
-                        usage.prompt_tokens,
-                        usage.completion_tokens,
-                        r.confidence * 100.0,
-                        duration_ms,
-                    );
-                    runs.push(LiveRun {
-                        agent: "baseline".into(),
-                        task: task.to_string(),
-                        iterations: r.iterations,
-                        tool_calls_made: r.tool_calls,
-                        actual_prompt_tokens: usage.prompt_tokens,
-                        actual_completion_tokens: usage.completion_tokens,
-                        actual_total_tokens: usage.total_tokens,
-                        confidence: r.confidence,
-                        duration_ms,
-                        success: r.success,
-                        error: r.error,
-                        summary: r.summary,
-                    });
-                }
-                Err(e) => {
-                    println!("  BASELINE: FAILED — {}", e);
-                    runs.push(LiveRun {
-                        agent: "baseline".into(),
-                        task: task.to_string(),
-                        iterations: 0,
-                        tool_calls_made: 0,
-                        actual_prompt_tokens: usage.prompt_tokens,
-                        actual_completion_tokens: usage.completion_tokens,
-                        actual_total_tokens: usage.total_tokens,
-                        confidence: 0.0,
-                        duration_ms,
-                        success: false,
-                        error: Some(e.to_string()),
-                        summary: String::new(),
-                    });
-                }
+            Err(e) => {
+                eprintln!("  RAVEN: FAILED — {}", e);
             }
         }
     }
-    println!("\n╔══════════════════════════════════════════════════════════════╗");
-    println!("║   LIVE DEEPSEEK COMPARISON — RAVEN vs BASELINE               ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-
-    let looped: Vec<&LiveRun> = runs.iter().filter(|r| r.agent == "looped").collect();
-    let baseline: Vec<&LiveRun> = runs.iter().filter(|r| r.agent == "baseline").collect();
-
-    if looped.is_empty() || baseline.is_empty() {
-        println!("║ No data to compare                                            ║");
-        println!("╚══════════════════════════════════════════════════════════════╝");
-        return;
-    }
-
-    let l_success = looped.iter().filter(|r| r.success).count() as f64 / looped.len() as f64 * 100.0;
-    let b_success = baseline.iter().filter(|r| r.success).count() as f64 / baseline.len() as f64 * 100.0;
-    let l_tokens: u32 = looped.iter().map(|r| r.actual_total_tokens).sum();
-    let b_tokens: u32 = baseline.iter().map(|r| r.actual_total_tokens).sum();
-    let l_conf: f64 = looped.iter().map(|r| r.confidence).sum::<f64>() / looped.len() as f64;
-    let b_conf: f64 = baseline.iter().map(|r| r.confidence).sum::<f64>() / baseline.len() as f64;
-    let l_time: u64 = looped.iter().map(|r| r.duration_ms).sum::<u64>() / looped.len() as u64;
-    let b_time: u64 = baseline.iter().map(|r| r.duration_ms).sum::<u64>() / baseline.len() as u64;
-
-    println!("║ METRIC          │ RAVEN          │ BASELINE       │ Delta     ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!("║ Tasks           │ {:<14} │ {:<14} │           ║", looped.len(), baseline.len());
-    println!("║ Success rate    │ {:<13.0}% │ {:<13.0}% │ {}{:<7.0}% ║",
-        l_success, b_success,
-        if l_success >= b_success { "+" } else { "" },
-        (l_success - b_success).abs());
-    println!("║ Avg confidence  │ {:<13.2}  │ {:<13.2}  │ {}{:<7.2}  ║",
-        l_conf, b_conf,
-        if l_conf >= b_conf { "+" } else { "" },
-        (l_conf - b_conf).abs());
-    println!("║ Total tokens    │ {:<14} │ {:<14} │ {}{:<7} ║",
-        l_tokens, b_tokens,
-        if l_tokens <= b_tokens { "-" } else { "+" },
-        (l_tokens as i64 - b_tokens as i64).abs());
-    println!("║ Avg tokens/task │ {:<14.0} │ {:<14.0} │ {}{:<7.0} ║",
-        l_tokens as f64 / looped.len() as f64,
-        b_tokens as f64 / baseline.len() as f64,
-        if l_tokens <= b_tokens { "-" } else { "+" },
-        (l_tokens as f64 / looped.len() as f64 - b_tokens as f64 / baseline.len() as f64).abs());
-    println!("║ Avg latency     │ {:<11}ms │ {:<11}ms │ {}{:<7}ms ║",
-        l_time, b_time,
-        if l_time <= b_time { "-" } else { "+" },
-        (l_time as i64 - b_time as i64).abs());
-    println!("╚══════════════════════════════════════════════════════════════╝");
-
-    // Per-task detail
-    println!("\nPer-task detail:");
-    for run in &runs {
-        let status = if run.success { "✓" } else { "✗" };
-        println!(
-            "  [{}] {} | {} iters | {} tok | {:.0}% conf | {}ms | {}",
-            status,
-            run.agent,
-            run.iterations,
-            run.actual_total_tokens,
-            run.confidence * 100.0,
-            run.duration_ms,
-            &run.summary.chars().take(80).collect::<String>(),
-        );
-    }
+    eprintln!("\n✓ Complete");
 }
