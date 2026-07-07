@@ -19,3 +19,5 @@ Thumbs.db
 
 # Odin data
 .odin/
+odin
+*.audit.jsonl

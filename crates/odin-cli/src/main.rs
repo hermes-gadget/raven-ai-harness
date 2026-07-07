@@ -16,6 +16,9 @@ use odin_core::types::AgentTask;
 use odin_runtime::{Agent, Runtime};
 use tracing_subscriber::EnvFilter;
 
+// Scheduler types
+use odin_scheduler::{JobId, Scheduler};
+
 // ── CLI Definition ───────────────────────────────────────────────────
 
 /// Raven AI harness — the Odin agent system.
@@ -74,6 +77,42 @@ enum Commands {
 
     /// Show version information.
     Version,
+
+    /// Manage scheduled cron jobs.
+    Schedule {
+        #[command(subcommand)]
+        action: ScheduleAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ScheduleAction {
+    /// Add a new scheduled job.
+    Add {
+        /// Human-readable name for this job.
+        name: String,
+        /// Cron expression (e.g., "0 */6 * * *").
+        schedule: String,
+        /// Task goal to execute when the job fires.
+        task: String,
+    },
+    /// List all scheduled jobs.
+    List,
+    /// Remove a job by ID.
+    Remove {
+        /// Job ID (UUID) to remove.
+        job_id: String,
+    },
+    /// Enable a disabled job by ID.
+    Enable {
+        /// Job ID (UUID) to enable.
+        job_id: String,
+    },
+    /// Disable an enabled job by ID.
+    Disable {
+        /// Job ID (UUID) to disable.
+        job_id: String,
+    },
 }
 
 // ── Entrypoint ───────────────────────────────────────────────────────
@@ -98,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         } => cmd_run(task, config, max_iterations).await,
         Commands::Serve { addr, config } => cmd_serve(addr, config).await,
         Commands::Config { path, edit } => cmd_config(path, edit),
+        Commands::Schedule { action } => cmd_schedule(action).await,
         Commands::Version => cmd_version(),
     }
 }
@@ -610,6 +650,98 @@ fn cmd_version() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `odin schedule` — Manage scheduled cron jobs.
+async fn cmd_schedule(action: ScheduleAction) -> anyhow::Result<()> {
+    let scheduler = Scheduler::default();
+
+    match action {
+        ScheduleAction::Add {
+            name,
+            schedule,
+            task,
+        } => {
+            // Parse the schedule to validate it before adding
+            // (Scheduler::add_job does this internally, but we check here
+            // to give a better error message)
+            if let Err(e) = odin_scheduler::Schedule::parse(&schedule) {
+                anyhow::bail!("Invalid cron expression '{}': {}", schedule, e);
+            }
+
+            let goal = task.clone();
+            let job_task: odin_scheduler::JobTask = std::sync::Arc::new(move || {
+                let g = goal.clone();
+                Box::pin(async move {
+                    tracing::info!("[Scheduler] Running task '{}'", g);
+                    println!("[Scheduler] Running task: {}", g);
+                })
+            });
+
+            let job_id = scheduler
+                .add_job(&name, &schedule, job_task)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to add job: {}", e))?;
+            println!("Job '{}' added with ID: {}", name, job_id);
+        }
+        ScheduleAction::List => {
+            let jobs = scheduler.list_jobs().await;
+            if jobs.is_empty() {
+                println!("No scheduled jobs.");
+            } else {
+                println!("Scheduled jobs:");
+                println!();
+                for job in &jobs {
+                    let status = if job.enabled { "enabled" } else { "disabled" };
+                    println!(
+                        "  {} — {} ({}) [{}]",
+                        job.id, job.name, job.schedule, status
+                    );
+                    println!(
+                        "         Last run: {}",
+                        job.last_run.map_or("never".into(), |t| t.to_rfc3339())
+                    );
+                    println!(
+                        "         Next run: {}",
+                        job.next_run.map_or("none".into(), |t| t.to_rfc3339())
+                    );
+                    println!("         Runs: {}", job.run_count);
+                }
+            }
+        }
+        ScheduleAction::Remove { job_id } => {
+            let id: JobId = job_id
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid job ID '{}': {}", job_id, e))?;
+            match scheduler.remove_job(id).await {
+                Ok(true) => println!("Job '{}' removed.", job_id),
+                Ok(false) => println!("Job '{}' not found.", job_id),
+                Err(e) => anyhow::bail!("Failed to remove job: {}", e),
+            }
+        }
+        ScheduleAction::Enable { job_id } => {
+            let id: JobId = job_id
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid job ID '{}': {}", job_id, e))?;
+            match scheduler.set_job_enabled(id, true).await {
+                Ok(true) => println!("Job '{}' enabled.", job_id),
+                Ok(false) => println!("Job '{}' not found.", job_id),
+                Err(e) => anyhow::bail!("Failed to enable job: {}", e),
+            }
+        }
+        ScheduleAction::Disable { job_id } => {
+            let id: JobId = job_id
+                .parse()
+                .map_err(|e| anyhow::anyhow!("Invalid job ID '{}': {}", job_id, e))?;
+            match scheduler.set_job_enabled(id, false).await {
+                Ok(true) => println!("Job '{}' disabled.", job_id),
+                Ok(false) => println!("Job '{}' not found.", job_id),
+                Err(e) => anyhow::bail!("Failed to disable job: {}", e),
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 /// Load configuration from an optional path.
@@ -665,6 +797,7 @@ fn build_profile() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::Cli;
+    use super::Commands;
     use clap::Parser;
 
     #[test]
@@ -696,5 +829,57 @@ mod tests {
     fn test_verify_cli() {
         // Just verify the CommandFactory works
         let _cmd = <Cli as clap::CommandFactory>::command();
+    }
+
+    #[test]
+    fn test_cli_parses_schedule_add() {
+        let cli = Cli::parse_from([
+            "odin",
+            "schedule",
+            "add",
+            "my-job",
+            "0 */6 * * *",
+            "run tests",
+        ]);
+        assert!(matches!(cli.command, Commands::Schedule { .. }));
+    }
+
+    #[test]
+    fn test_cli_parses_schedule_list() {
+        let cli = Cli::parse_from(["odin", "schedule", "list"]);
+        assert!(matches!(cli.command, Commands::Schedule { .. }));
+    }
+
+    #[test]
+    fn test_cli_parses_schedule_remove() {
+        let cli = Cli::parse_from([
+            "odin",
+            "schedule",
+            "remove",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ]);
+        assert!(matches!(cli.command, Commands::Schedule { .. }));
+    }
+
+    #[test]
+    fn test_cli_parses_schedule_enable() {
+        let cli = Cli::parse_from([
+            "odin",
+            "schedule",
+            "enable",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ]);
+        assert!(matches!(cli.command, Commands::Schedule { .. }));
+    }
+
+    #[test]
+    fn test_cli_parses_schedule_disable() {
+        let cli = Cli::parse_from([
+            "odin",
+            "schedule",
+            "disable",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ]);
+        assert!(matches!(cli.command, Commands::Schedule { .. }));
     }
 }

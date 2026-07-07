@@ -22,5 +22,10 @@ parking_lot.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 odin-baseline = { path = "../odin-baseline" }
 odin-permissions = { path = "../odin-permissions" }
+criterion = { workspace = true }
 rand = "0.8"
 reqwest = { workspace = true }
+
+[[bench]]
+name = "loop_bench"
+harness = false
