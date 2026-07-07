@@ -67,7 +67,7 @@ impl Job {
 
     /// Check if this job is due to run at the given time.
     pub fn is_due(&self, now: &DateTime<Utc>) -> bool {
-        self.enabled && self.next_run.map_or(false, |t| t <= *now)
+        self.enabled && self.next_run.is_some_and(|t| t <= *now)
     }
 
     /// Calculate the next run time after the current one completes.

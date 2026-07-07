@@ -41,7 +41,7 @@ impl Provider for LocalProvider {
         // For local providers, we use the generic /models endpoint
         let resp = self
             .client
-            .get(&format!("{}/models", self.base_url))
+            .get(format!("{}/models", self.base_url))
             .send()
             .await;
 

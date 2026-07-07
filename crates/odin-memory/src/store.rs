@@ -194,8 +194,8 @@ impl MemoryStore for SqliteMemoryStore {
     ) -> OdinResult<Vec<MemoryEntry>> {
         let conn = self.conn.lock().await;
 
-        let category_str = serde_json::to_value(&category)
-            .and_then(|v| Ok(v.as_str().unwrap_or("fact").to_string()))
+        let category_str = serde_json::to_value(category)
+            .map(|v| v.as_str().unwrap_or("fact").to_string())
             .unwrap_or_else(|_| "fact".to_string());
         let limit = limit as i64;
 

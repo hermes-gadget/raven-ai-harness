@@ -10,22 +10,13 @@
 use odin_core::error::OdinResult;
 
 /// Configuration for the Discord gateway.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DiscordConfig {
     /// Whether the Discord gateway is enabled.
     pub enabled: bool,
 
     /// Discord bot token.
     pub token: Option<String>,
-}
-
-impl Default for DiscordConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            token: None,
-        }
-    }
 }
 
 /// A stub for the Discord integration.

@@ -4,7 +4,6 @@
 //! Used by the Critique phase to decide whether to continue, retry, or escalate.
 
 use odin_core::types::ConfidenceScore;
-use serde::{Deserialize, Serialize};
 
 /// Scores confidence in an agent's action.
 ///

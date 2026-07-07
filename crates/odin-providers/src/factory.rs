@@ -53,10 +53,10 @@ fn resolve_api_key(
     env_var: &Option<String>,
 ) -> OdinResult<Option<String>> {
     // Prefer direct key
-    if let Some(key) = direct {
-        if !key.is_empty() {
-            return Ok(Some(key.clone()));
-        }
+    if let Some(key) = direct
+        && !key.is_empty()
+    {
+        return Ok(Some(key.clone()));
     }
 
     // Otherwise try env var

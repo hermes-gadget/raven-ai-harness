@@ -1,7 +1,6 @@
 //! Runtime — orchestrates multiple agents, manages sessions, and spawns sub-agents.
 
 use dashmap::DashMap;
-use odin_core::config::OdinConfig;
 use odin_core::error::OdinResult;
 use odin_core::traits::MemoryStore;
 use odin_core::types::{AgentId, AgentTask, SessionId, TaskResult};
@@ -171,13 +170,13 @@ impl Runtime {
         let result = agent.execute_task(task).await?;
 
         // If a session is provided, record the task result
-        if let Some(sid) = session_id {
-            if let Some(mut session) = self.sessions.get_mut(&sid) {
-                session.add_message(odin_core::types::Message::system(format!(
-                    "Task result: {}",
-                    result.summary
-                )));
-            }
+        if let Some(sid) = session_id
+            && let Some(mut session) = self.sessions.get_mut(&sid)
+        {
+            session.add_message(odin_core::types::Message::system(format!(
+                "Task result: {}",
+                result.summary
+            )));
         }
 
         Ok(result)

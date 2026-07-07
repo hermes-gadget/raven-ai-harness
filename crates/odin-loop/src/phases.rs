@@ -11,7 +11,7 @@ use odin_core::types::*;
 use std::sync::Arc;
 
 use crate::confidence::ConfidenceScorer;
-use crate::decomposer::{DecomposedPlan, GoalDecomposer};
+use crate::decomposer::{DecomposedPlan, Dependency, GoalDecomposer};
 use crate::summarizer::StateSummarizer;
 
 // ── Phase Traits ────────────────────────────────────────────────────
@@ -60,12 +60,67 @@ impl Phase for PlanPhase {
     async fn execute(
         &self,
         state: &mut LoopState,
-        _context: &PhaseContext,
+        context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
         tracing::info!("[PLAN] Planning for task: {}", state.task.goal);
 
-        // Decompose the goal into sub-tasks
-        let plan = self.decomposer.decompose_heuristic(&state.task.goal);
+        // Try LLM-based decomposition if a provider is available
+        let plan = if let Some(ref provider) = context.provider {
+            let prompt = "Break this goal into sub-tasks. List each sub-task as a separate line starting with '- '. Keep descriptions concise and actionable.";
+            let mut msgs = state.messages.clone();
+            msgs.push(Message::user(prompt));
+            match provider
+                .chat("", &msgs, &[], &CompletionOptions::default())
+                .await
+            {
+                Ok(response) => {
+                    let text = response.message.text().unwrap_or("").to_string();
+                    tracing::info!("[PLAN] LLM decomposition response received");
+                    // Parse sub-tasks from the LLM response
+                    let sub_tasks: Vec<SubTask> = text
+                        .lines()
+                        .filter(|line| line.trim().starts_with("- "))
+                        .enumerate()
+                        .map(|(i, line)| SubTask {
+                            id: format!("sub_{}", i + 1),
+                            description: line.trim().trim_start_matches("- ").to_string(),
+                            status: SubTaskStatus::Pending,
+                            result: None,
+                        })
+                        .collect();
+
+                    if sub_tasks.is_empty() {
+                        tracing::warn!(
+                            "[PLAN] LLM returned no parseable sub-tasks, falling back to heuristic"
+                        );
+                        self.decomposer.decompose_heuristic(&state.task.goal)
+                    } else {
+                        // Build sequential dependencies
+                        let dependencies: Vec<Dependency> = sub_tasks
+                            .windows(2)
+                            .map(|pair| Dependency {
+                                from: pair[0].id.clone(),
+                                to: pair[1].id.clone(),
+                                reason: "Sequential order".into(),
+                            })
+                            .collect();
+
+                        DecomposedPlan {
+                            goal: state.task.goal.clone(),
+                            sub_tasks,
+                            dependencies,
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("[PLAN] LLM call failed: {}", e);
+                    self.decomposer.decompose_heuristic(&state.task.goal)
+                }
+            }
+        } else {
+            tracing::info!("[PLAN] No provider available, using heuristic decomposition");
+            self.decomposer.decompose_heuristic(&state.task.goal)
+        };
         let task_count = plan.sub_tasks.len();
 
         // Update the task's sub-tasks
@@ -323,7 +378,7 @@ impl Phase for InspectPhase {
     async fn execute(
         &self,
         state: &mut LoopState,
-        context: &PhaseContext,
+        _context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
         tracing::info!("[INSPECT] Inspecting results of action");
 
@@ -395,31 +450,71 @@ impl Phase for CritiquePhase {
     async fn execute(
         &self,
         state: &mut LoopState,
-        _context: &PhaseContext,
+        context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
         tracing::info!("[CRITIQUE] Self-evaluating action");
 
         state.current_phase = LoopPhase::Critique;
 
-        // Score the last action
-        let confidence = if let Some(last_tool) = state.tool_results.last() {
-            self.scorer.score_tool_result(
-                last_tool.success,
-                !last_tool.output.is_empty(),
-                last_tool.error.is_some(),
-                last_tool.duration_ms,
-            )
-        } else if let Some(last_msg) = state.messages.last() {
-            let text = last_msg.text().unwrap_or("");
-            // For reasoning models, the response is always valid — trust it
-            if text.len() > 200 {
-                ConfidenceScore::new(0.9) // Substantial response = high confidence
-            } else {
-                self.scorer
-                    .score_text_response(text, Some(&state.task.goal))
+        // Score the last action — try LLM critique first if a provider is available
+        let confidence = if let Some(ref provider) = context.provider {
+            let last_action = state
+                .messages
+                .last()
+                .and_then(|m| m.text())
+                .unwrap_or("unknown action");
+            let last_result = state
+                .tool_results
+                .last()
+                .map(|tr| {
+                    format!(
+                        "Tool: {}, success: {}, output: {}, error: {}",
+                        tr.tool_name,
+                        tr.success,
+                        tr.output.len(),
+                        tr.error.as_deref().unwrap_or("none")
+                    )
+                })
+                .unwrap_or_else(|| "No tool result".to_string());
+
+            let prompt = format!(
+                "Evaluate the last action. Was it successful? What could be improved? \
+                 Score your confidence 0.0-1.0.\n\
+                 \nLast action: {}\nLast result: {}\nGoal: {}\n\n\
+                 Respond with your analysis and then a confidence score.",
+                last_action, last_result, state.task.goal
+            );
+
+            let mut msgs = state.messages.clone();
+            msgs.push(Message::user(prompt));
+            match provider
+                .chat("", &msgs, &[], &CompletionOptions::default())
+                .await
+            {
+                Ok(response) => {
+                    let text = response.message.text().unwrap_or("").to_string();
+                    tracing::info!("[CRITIQUE] LLM critique received");
+
+                    // Parse confidence from LLM response
+                    let parsed = parse_confidence_from_text(&text);
+                    match parsed {
+                        Some(score) => ConfidenceScore::new(score),
+                        None => {
+                            tracing::warn!(
+                                "[CRITIQUE] Could not parse confidence from LLM, using heuristics"
+                            );
+                            fallback_critique_confidence(state, &self.scorer)
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("[CRITIQUE] LLM call failed: {}", e);
+                    fallback_critique_confidence(state, &self.scorer)
+                }
             }
         } else {
-            ConfidenceScore::new(0.5)
+            tracing::info!("[CRITIQUE] No provider available, using heuristic scoring");
+            fallback_critique_confidence(state, &self.scorer)
         };
 
         let decision = if confidence.is_high() {
@@ -472,7 +567,7 @@ impl Phase for RevisePhase {
     async fn execute(
         &self,
         state: &mut LoopState,
-        _context: &PhaseContext,
+        context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
         tracing::info!(
             "[REVISE] Revising approach (retry count: {})",
@@ -482,10 +577,44 @@ impl Phase for RevisePhase {
         state.current_phase = LoopPhase::Revise;
         state.retry_count += 1;
 
-        let strategy = match state.retry_count {
-            1 => "Retrying with same parameters",
-            2 => "Retrying with adjusted parameters",
-            _ => "Escalating to stronger model",
+        // Try LLM-based revision if a provider is available
+        let strategy = if let Some(ref provider) = context.provider {
+            let last_error = state
+                .tool_results
+                .last()
+                .and_then(|tr| tr.error.as_deref())
+                .unwrap_or("unknown");
+            let last_msg = state.messages.last().and_then(|m| m.text()).unwrap_or("");
+
+            let prompt = format!(
+                "The last attempt was not fully successful. Suggest a revised approach.\n\n\
+                 Goal: {}\n\
+                 Last message: {}\n\
+                 Last error: {}\n\
+                 Attempt number: {}\n\n\
+                 Suggest what to do differently. Be specific and actionable.",
+                state.task.goal, last_msg, last_error, state.retry_count
+            );
+
+            let mut msgs = state.messages.clone();
+            msgs.push(Message::user(prompt));
+            match provider
+                .chat("", &msgs, &[], &CompletionOptions::default())
+                .await
+            {
+                Ok(response) => {
+                    let text = response.message.text().unwrap_or("").to_string();
+                    tracing::info!("[REVISE] LLM revision suggestion received");
+                    text
+                }
+                Err(e) => {
+                    tracing::warn!("[REVISE] LLM call failed: {}", e);
+                    fallback_revise_strategy(state.retry_count)
+                }
+            }
+        } else {
+            tracing::info!("[REVISE] No provider available, using heuristic strategy");
+            fallback_revise_strategy(state.retry_count)
         };
 
         state.messages.push(Message::system(format!(
@@ -551,27 +680,112 @@ impl Phase for VerifyPhase {
                 .find(|st| st.status == SubTaskStatus::Pending)
         });
 
-        let verification = match current_task {
-            Some(task) => {
-                // In production: actually verify the results
-                format!("Verifying completion of: {}", task.description)
+        // Try LLM-based verification if a provider is available
+        let (verification, confidence) = if let Some(ref provider) = context.provider {
+            let criteria_summary = if state.task.success_criteria.is_empty() {
+                "No specific success criteria defined.".to_string()
+            } else {
+                format!(
+                    "Success criteria:\n{}",
+                    state
+                        .task
+                        .success_criteria
+                        .iter()
+                        .map(|c| format!("- {}", c))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
+
+            let task_desc = match current_task {
+                Some(task) => format!("Current sub-task: {}", task.description),
+                None => "All sub-tasks appear complete".to_string(),
+            };
+
+            let prompt = format!(
+                "Has the goal been achieved? Check against these success criteria and the conversation history.\n\n\
+                     Goal: {}\n\
+                     {}\n\
+                     {}\n\n\
+                     Respond with your analysis and a clear conclusion: 'VERIFIED' or 'NOT VERIFIED'.\n\
+                     Also provide a confidence score 0.0-1.0.",
+                state.task.goal, criteria_summary, task_desc
+            );
+
+            let mut msgs = state.messages.clone();
+            msgs.push(Message::user(prompt));
+            match provider
+                .chat("", &msgs, &[], &CompletionOptions::default())
+                .await
+            {
+                Ok(response) => {
+                    let text = response.message.text().unwrap_or("").to_string();
+                    tracing::info!("[VERIFY] LLM verification received");
+
+                    // Determine verification status from LLM response
+                    let lower = text.to_lowercase();
+                    let verified = lower.contains("verified")
+                        && !lower.contains("not verified")
+                        && !lower.contains("not_verified");
+
+                    // Parse confidence or use heuristic
+                    let conf = parse_confidence_from_text(&text)
+                        .map(ConfidenceScore::new)
+                        .unwrap_or_else(|| {
+                            if verified {
+                                ConfidenceScore::new(0.85)
+                            } else {
+                                ConfidenceScore::new(0.5)
+                            }
+                        });
+
+                    (text, conf)
+                }
+                Err(e) => {
+                    tracing::warn!("[VERIFY] LLM call failed: {}", e);
+                    // Fall through to heuristic
+                    let verification = match current_task {
+                        Some(task) => {
+                            format!("Verifying completion of: {}", task.description)
+                        }
+                        None => "All sub-tasks appear complete".to_string(),
+                    };
+                    let all_criteria_met = state.task.success_criteria.is_empty()
+                        || state.task.success_criteria.iter().all(|c| {
+                            state
+                                .messages
+                                .iter()
+                                .any(|m| m.text().map(|t| t.contains(c.as_str())).unwrap_or(false))
+                        });
+                    let conf = if all_criteria_met {
+                        ConfidenceScore::new(0.9)
+                    } else {
+                        ConfidenceScore::new(0.6)
+                    };
+                    (verification, conf)
+                }
             }
-            None => "All sub-tasks appear complete".to_string(),
-        };
-
-        // Check success criteria
-        let all_criteria_met = state.task.success_criteria.is_empty()
-            || state.task.success_criteria.iter().all(|c| {
-                state
-                    .messages
-                    .iter()
-                    .any(|m| m.text().map(|t| t.contains(c.as_str())).unwrap_or(false))
-            });
-
-        let confidence = if all_criteria_met {
-            ConfidenceScore::new(0.9)
         } else {
-            ConfidenceScore::new(0.6)
+            tracing::info!("[VERIFY] No provider available, using heuristic verification");
+            let verification = match current_task {
+                Some(task) => {
+                    format!("Verifying completion of: {}", task.description)
+                }
+                None => "All sub-tasks appear complete".to_string(),
+            };
+            let all_criteria_met = state.task.success_criteria.is_empty()
+                || state.task.success_criteria.iter().all(|c| {
+                    state
+                        .messages
+                        .iter()
+                        .any(|m| m.text().map(|t| t.contains(c.as_str())).unwrap_or(false))
+                });
+            let conf = if all_criteria_met {
+                ConfidenceScore::new(0.9)
+            } else {
+                ConfidenceScore::new(0.6)
+            };
+            (verification, conf)
         };
 
         let record = PhaseRecord {
@@ -677,5 +891,106 @@ impl Phase for DecidePhase {
             confidence: last_confidence.unwrap_or(ConfidenceScore::new(0.7)),
             tool_results: vec![],
         })
+    }
+}
+
+// ── Helper Functions ──────────────────────────────────────────────────
+
+/// Parse a confidence score (0.0–1.0) from LLM response text.
+///
+/// Looks for patterns like:
+/// - "Confidence: 0.85"
+/// - "Score: 92%"
+/// - "confidence: 0.75"
+/// - "0.9" near end of text
+/// - "XX%" anywhere in text
+fn parse_confidence_from_text(text: &str) -> Option<f64> {
+    let lower = text.to_lowercase();
+
+    // Pattern 1: Explicit "confidence: 0.X" or "score: 0.X"
+    for prefix in &["confidence:", "score:", "confidence score:"] {
+        if let Some(idx) = lower.find(prefix) {
+            let rest = &lower[idx + prefix.len()..];
+            // Try to find a decimal number after the colon
+            if let Some(num_start) = rest.find(|c: char| c.is_ascii_digit() || c == '.') {
+                let num_str: String = rest[num_start..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                if let Ok(val) = num_str.parse::<f64>()
+                    && (0.0..=1.0).contains(&val)
+                {
+                    return Some(val);
+                }
+            }
+        }
+    }
+
+    // Pattern 2: "XX%" anywhere in the text
+    for (i, _) in lower.match_indices('%') {
+        let start = i.saturating_sub(4);
+        let before = &lower[start..i].trim();
+        if let Some(num_start) = before.rfind(|c: char| !c.is_ascii_digit() && c != '.') {
+            let num_str = before[num_start + 1..].trim();
+            if let Ok(val) = num_str.parse::<f64>()
+                && (0.0..=100.0).contains(&val)
+            {
+                return Some(val / 100.0);
+            }
+        } else if let Ok(val) = before.parse::<f64>()
+            && (0.0..=100.0).contains(&val)
+        {
+            return Some(val / 100.0);
+        }
+    }
+
+    // Pattern 3: Look for a decimal 0.X pattern near the end of text (last 200 chars)
+    let tail = if text.len() > 200 {
+        &text[text.len().saturating_sub(200)..]
+    } else {
+        text
+    };
+    for num_str in tail.split_whitespace() {
+        // Strip trailing punctuation
+        let cleaned = num_str.trim_end_matches(|c: char| c.is_ascii_punctuation());
+        if let Ok(val) = cleaned.parse::<f64>()
+            && (0.0..=1.0).contains(&val)
+            && val > 0.0
+        {
+            return Some(val);
+        }
+    }
+
+    None
+}
+
+/// Fallback heuristic confidence scoring for the CRITIQUE phase.
+fn fallback_critique_confidence(state: &LoopState, scorer: &ConfidenceScorer) -> ConfidenceScore {
+    if let Some(last_tool) = state.tool_results.last() {
+        scorer.score_tool_result(
+            last_tool.success,
+            !last_tool.output.is_empty(),
+            last_tool.error.is_some(),
+            last_tool.duration_ms,
+        )
+    } else if let Some(last_msg) = state.messages.last() {
+        let text = last_msg.text().unwrap_or("");
+        // For reasoning models, the response is always valid — trust it
+        if text.len() > 200 {
+            ConfidenceScore::new(0.9) // Substantial response = high confidence
+        } else {
+            scorer.score_text_response(text, Some(&state.task.goal))
+        }
+    } else {
+        ConfidenceScore::new(0.5)
+    }
+}
+
+/// Fallback heuristic revision strategy string.
+fn fallback_revise_strategy(retry_count: u32) -> String {
+    match retry_count {
+        1 => "Retrying with same parameters".to_string(),
+        2 => "Retrying with adjusted parameters".to_string(),
+        _ => "Escalating to stronger model".to_string(),
     }
 }

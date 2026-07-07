@@ -59,8 +59,8 @@ impl MemoryRow {
         Self {
             id: entry.id.clone(),
             content: entry.content.clone(),
-            category: serde_json::to_value(&entry.category)
-                .and_then(|v| Ok(v.as_str().unwrap_or("").to_string()))
+            category: serde_json::to_value(entry.category)
+                .map(|v| v.as_str().unwrap_or("").to_string())
                 .unwrap_or_else(|_| "fact".to_string()),
             created_at: entry.created_at.to_rfc3339(),
             updated_at: entry.updated_at.to_rfc3339(),

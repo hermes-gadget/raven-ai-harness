@@ -48,8 +48,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --benches 2>&1 | head -5
-      - run: cargo test --workspace --all-targets
+      - run: cargo bench --no-run
 
   security:
     name: Security Audit

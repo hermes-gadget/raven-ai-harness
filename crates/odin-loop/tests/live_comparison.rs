@@ -12,7 +12,6 @@
 /// the reqwest Client connection pool drain hanging test completion.
 use async_trait::async_trait;
 use chrono::Utc;
-use odin_baseline::BaselineAgent;
 use odin_core::error::OdinResult;
 use odin_core::traits::{ChatStream, LoopEngine as LoopEngineTrait, Provider};
 use odin_core::types::*;
@@ -242,23 +241,24 @@ impl Provider for DeepSeekProvider {
 
 fn load_api_key() -> Option<String> {
     // 1. Check DEEPSEEK_API_KEY env var (secure, not in repo)
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        if !key.is_empty() && key != "sk-..." {
-            return Some(key);
-        }
+    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY")
+        && !key.is_empty()
+        && key != "sk-..."
+    {
+        return Some(key);
     }
 
     // 2. Check ~/.odin/.env file
     let home = std::env::var("HOME").ok()?;
     let env_path = std::path::PathBuf::from(home).join(".odin/.env");
-    if env_path.exists() {
-        if let Ok(contents) = std::fs::read_to_string(&env_path) {
-            for line in contents.lines() {
-                if let Some(key) = line.strip_prefix("DEEPSEEK_API_KEY=") {
-                    let key = key.trim().trim_matches('"').trim_matches('\'');
-                    if !key.is_empty() {
-                        return Some(key.to_string());
-                    }
+    if env_path.exists()
+        && let Ok(contents) = std::fs::read_to_string(&env_path)
+    {
+        for line in contents.lines() {
+            if let Some(key) = line.strip_prefix("DEEPSEEK_API_KEY=") {
+                let key = key.trim().trim_matches('"').trim_matches('\'');
+                if !key.is_empty() {
+                    return Some(key.to_string());
                 }
             }
         }

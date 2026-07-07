@@ -96,7 +96,7 @@ impl Tool for FileRead {
 
         let content = tokio::fs::read_to_string(&canonical)
             .await
-            .map_err(|e| OdinError::Io(e))?;
+            .map_err(OdinError::Io)?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -200,12 +200,12 @@ impl Tool for FileWrite {
         if let Some(parent) = canonical.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|e| OdinError::Io(e))?;
+                .map_err(OdinError::Io)?;
         }
 
         tokio::fs::write(&canonical, &parsed.content)
             .await
-            .map_err(|e| OdinError::Io(e))?;
+            .map_err(OdinError::Io)?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 

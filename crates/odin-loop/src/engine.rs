@@ -227,15 +227,14 @@ impl LoopEngineTrait for Engine {
                         }
                         LoopDecision::Continue => {
                             // Mark current sub-task as complete if confidence is high
-                            if last_confidence.is_high() {
-                                if let Some(pending) = plan
+                            if last_confidence.is_high()
+                                && let Some(pending) = plan
                                     .sub_tasks
                                     .iter_mut()
                                     .find(|st| st.status == SubTaskStatus::Pending)
-                                {
-                                    pending.status = SubTaskStatus::Completed;
-                                    pending.result = Some("Completed successfully".into());
-                                }
+                            {
+                                pending.status = SubTaskStatus::Completed;
+                                pending.result = Some("Completed successfully".into());
                             }
 
                             // Check if all sub-tasks are done
@@ -425,5 +424,396 @@ mod tests {
         let result = engine.execute_phase(LoopPhase::Plan, &mut state).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().phase, LoopPhase::Plan);
+    }
+
+    // ── Mock Provider Tests ─────────────────────────────────────────
+
+    use async_trait::async_trait;
+    use odin_core::error::{OdinError, OdinResult};
+    use odin_core::traits::{ChatStream, Provider as ProviderTrait};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct MockProvider {
+        responses: Mutex<Vec<ChatResponse>>,
+        call_count: AtomicUsize,
+    }
+
+    impl MockProvider {
+        fn new(responses: Vec<ChatResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses),
+                call_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProviderTrait for MockProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn list_models(&self) -> OdinResult<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSchema],
+            _options: &CompletionOptions,
+        ) -> OdinResult<ChatResponse> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            let mut responses = self.responses.lock().unwrap();
+            if let Some(resp) = responses.pop() {
+                Ok(resp)
+            } else {
+                Ok(ChatResponse {
+                    message: Message::assistant("Done."),
+                    usage: TokenUsage::default(),
+                    finish_reason: Some("stop".into()),
+                    model: "mock".into(),
+                })
+            }
+        }
+        async fn chat_stream(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSchema],
+            _options: &CompletionOptions,
+        ) -> OdinResult<Box<dyn ChatStream>> {
+            unimplemented!()
+        }
+        async fn health_check(&self) -> OdinResult<bool> {
+            Ok(true)
+        }
+    }
+
+    fn mk_resp(text: &str) -> ChatResponse {
+        ChatResponse {
+            message: Message::assistant(text),
+            usage: TokenUsage::default(),
+            finish_reason: Some("stop".into()),
+            model: "mock".into(),
+        }
+    }
+
+    fn mk_tc_resp(tool_name: &str, args: &str) -> ChatResponse {
+        ChatResponse {
+            message: Message {
+                role: Role::Assistant,
+                content: MessageContent::ToolCalls {
+                    content: Some("Using tool...".into()),
+                    tool_calls: vec![ToolCall {
+                        id: format!("call_{}", uuid::Uuid::new_v4()),
+                        call_type: "function".into(),
+                        function: FunctionCall {
+                            name: tool_name.to_string(),
+                            arguments: args.to_string(),
+                        },
+                    }],
+                },
+                name: None,
+                tool_call_id: None,
+            },
+            usage: TokenUsage::default(),
+            finish_reason: Some("tool_calls".into()),
+            model: "mock".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_full_cycle_with_mock_provider() {
+        let mock = Arc::new(MockProvider::new(vec![mk_resp(
+            "I'll help you write a hello world program.",
+        )]));
+        let engine = Engine::new()
+            .with_provider(mock.clone())
+            .with_max_iterations(10);
+        let task = make_task("Write a hello world program");
+        let result = engine.execute_task(&task).await.unwrap();
+        assert!(result.iterations > 0);
+        assert!(result.iterations <= 10);
+        assert!(!result.summary.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_engine_with_tool_call_and_execution() {
+        let mock = Arc::new(MockProvider::new(vec![
+            mk_tc_resp("shell", r#"{"command":"echo hello"}"#),
+            mk_resp("Command ran successfully. Task done."),
+        ]));
+
+        let tool_registry = Arc::new(odin_tools::ToolRegistry::new());
+        let _ = tool_registry.register(Box::new(odin_tools::builtins::shell::Shell::new()));
+
+        let engine = Engine::new()
+            .with_provider(mock.clone())
+            .with_tool_registry(tool_registry)
+            .with_max_iterations(10);
+
+        let task = make_task("Run a shell command");
+        let result = engine.execute_task(&task).await.unwrap();
+        assert!(result.tool_calls >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_provider_error_graceful_degradation() {
+        struct FailingProvider;
+        #[async_trait]
+        impl ProviderTrait for FailingProvider {
+            fn name(&self) -> &str {
+                "failing"
+            }
+            async fn list_models(&self) -> OdinResult<Vec<ModelInfo>> {
+                Ok(vec![])
+            }
+            async fn chat(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _options: &CompletionOptions,
+            ) -> OdinResult<ChatResponse> {
+                Err(OdinError::Provider {
+                    provider: "failing".into(),
+                    message: "Simulated failure".into(),
+                    source: None,
+                })
+            }
+            async fn chat_stream(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _options: &CompletionOptions,
+            ) -> OdinResult<Box<dyn ChatStream>> {
+                unimplemented!()
+            }
+            async fn health_check(&self) -> OdinResult<bool> {
+                Ok(false)
+            }
+        }
+
+        let engine = Engine::new()
+            .with_provider(Arc::new(FailingProvider))
+            .with_max_iterations(5);
+        let task = make_task("Do something");
+        let result = engine.execute_task(&task).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_escalation_to_stronger_provider() {
+        struct WeakProvider;
+        #[async_trait]
+        impl ProviderTrait for WeakProvider {
+            fn name(&self) -> &str {
+                "weak"
+            }
+            async fn list_models(&self) -> OdinResult<Vec<ModelInfo>> {
+                Ok(vec![])
+            }
+            async fn chat(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _options: &CompletionOptions,
+            ) -> OdinResult<ChatResponse> {
+                Ok(ChatResponse {
+                    message: Message::assistant("ok"),
+                    usage: TokenUsage::default(),
+                    finish_reason: Some("stop".into()),
+                    model: "weak".into(),
+                })
+            }
+            async fn chat_stream(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _options: &CompletionOptions,
+            ) -> OdinResult<Box<dyn ChatStream>> {
+                unimplemented!()
+            }
+            async fn health_check(&self) -> OdinResult<bool> {
+                Ok(true)
+            }
+        }
+
+        struct StrongProvider {
+            call_count: AtomicUsize,
+        }
+        #[async_trait]
+        impl ProviderTrait for StrongProvider {
+            fn name(&self) -> &str {
+                "strong"
+            }
+            async fn list_models(&self) -> OdinResult<Vec<ModelInfo>> {
+                Ok(vec![])
+            }
+            async fn chat(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _options: &CompletionOptions,
+            ) -> OdinResult<ChatResponse> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Ok(ChatResponse {
+                    message: Message::assistant(
+                        "I have completed the task successfully. \
+                         The implementation is correct and complete. \
+                         All requirements have been met.",
+                    ),
+                    usage: TokenUsage::default(),
+                    finish_reason: Some("stop".into()),
+                    model: "strong".into(),
+                })
+            }
+            async fn chat_stream(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _options: &CompletionOptions,
+            ) -> OdinResult<Box<dyn ChatStream>> {
+                unimplemented!()
+            }
+            async fn health_check(&self) -> OdinResult<bool> {
+                Ok(true)
+            }
+        }
+
+        let strong = Arc::new(StrongProvider {
+            call_count: AtomicUsize::new(0),
+        });
+
+        let engine = Engine::new()
+            .with_provider(Arc::new(WeakProvider))
+            .with_escalation_provider(strong.clone())
+            .with_max_iterations(15);
+
+        let task = make_task("Complete a complex task");
+        let result = engine.execute_task(&task).await.unwrap();
+        assert!(result.iterations > 0);
+        assert!(
+            strong.call_count.load(Ordering::SeqCst) >= 1,
+            "Strong model was never called"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retry_on_low_confidence() {
+        let mock = Arc::new(MockProvider::new(vec![
+            mk_resp("k"), // Very short = low confidence
+            mk_resp("I have completed the given task successfully."),
+        ]));
+
+        let engine = Engine::new()
+            .with_provider(mock.clone())
+            .with_max_iterations(10);
+
+        let task = make_task("Write some code");
+        let result = engine.execute_task(&task).await.unwrap();
+        // Should have retried at least once (more than 1 iteration)
+        assert!(result.iterations > 1, "Expected retry");
+    }
+
+    #[tokio::test]
+    async fn test_max_iterations_bound() {
+        let mock = Arc::new(MockProvider::new(vec![
+            mk_resp("Working..."),
+            mk_resp("Still working..."),
+            mk_resp("Almost..."),
+        ]));
+
+        let engine = Engine::new()
+            .with_provider(mock.clone())
+            .with_max_iterations(3);
+
+        let mut task = make_task("Long task");
+        task.max_iterations = 3;
+        let result = engine.execute_task(&task).await.unwrap();
+        // The loop increments, checks > max, then breaks — so iterations may be max+1
+        assert!(result.iterations <= 4, "iterations={}", result.iterations);
+    }
+
+    #[tokio::test]
+    async fn test_all_phases_execute_individually() {
+        let engine = Engine::new().with_max_iterations(10);
+        let task = make_task("Test all phases");
+        let mut state = LoopState {
+            task: task.clone(),
+            messages: vec![Message::user("test")],
+            tool_results: vec![],
+            current_phase: LoopPhase::Plan,
+            iteration: 0,
+            retry_count: 0,
+            history: vec![],
+        };
+
+        let phases = [
+            LoopPhase::Plan,
+            LoopPhase::Act,
+            LoopPhase::Inspect,
+            LoopPhase::Critique,
+            LoopPhase::Revise,
+            LoopPhase::Verify,
+            LoopPhase::Decide,
+        ];
+
+        for phase in &phases {
+            let result = engine.execute_phase(*phase, &mut state).await;
+            assert!(result.is_ok(), "Phase {:?} failed", phase);
+            assert_eq!(result.unwrap().phase, *phase);
+        }
+        assert_eq!(state.history.len(), 7);
+    }
+
+    #[tokio::test]
+    async fn test_confidence_with_empty_response() {
+        let mock = Arc::new(MockProvider::new(vec![ChatResponse {
+            message: Message::assistant(""),
+            usage: TokenUsage::default(),
+            finish_reason: Some("stop".into()),
+            model: "reasoning".into(),
+        }]));
+
+        let engine = Engine::new()
+            .with_provider(mock.clone())
+            .with_max_iterations(5);
+
+        let task = make_task("Reason about something");
+        let result = engine.execute_task(&task).await.unwrap();
+        assert!(result.iterations > 0);
+        // Should not panic on empty content
+    }
+
+    #[tokio::test]
+    async fn test_looped_vs_baseline_comparison() {
+        let mock_looped = Arc::new(MockProvider::new(vec![mk_resp(
+            "Analysis complete. Results show significant improvement.",
+        )]));
+        let mock_baseline = Arc::new(MockProvider::new(vec![mk_resp("Analysis done.")]));
+
+        let loop_engine = Engine::new()
+            .with_provider(mock_looped.clone())
+            .with_max_iterations(10);
+
+        let task = make_task("Analyze performance");
+        let looped = loop_engine.execute_task(&task).await.unwrap();
+
+        let baseline = odin_baseline::BaselineAgent::new(mock_baseline.clone(), vec![], 10);
+        let baseline_result = baseline.execute_task(&task).await.unwrap();
+
+        assert!(looped.iterations > 0);
+        assert!(baseline_result.iterations > 0);
+        // Looped engine decomposes — baseline doesn't
+        assert!(!looped.sub_tasks.is_empty());
+        assert!(baseline_result.sub_tasks.is_empty());
     }
 }

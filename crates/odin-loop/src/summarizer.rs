@@ -11,6 +11,7 @@ use odin_core::types::*;
 #[derive(Debug, Clone)]
 pub struct StateSummarizer {
     /// Maximum tokens to keep in the summary
+    #[allow(dead_code)]
     max_summary_tokens: u32,
 }
 

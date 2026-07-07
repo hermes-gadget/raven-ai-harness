@@ -29,7 +29,7 @@ This helps smaller models succeed through:
 - 📋 **Skill system** — reusable procedural workflows
 - 🔒 **Safety-first** — permission engine, approval gates, audit trails
 - ⏰ **Scheduler** — cron-style job scheduling
-- 💬 **Discord gateway** — control agents from Discord
+- 💬 **Discord gateway** — control agents from Discord (⚠️ stub — not fully wired yet)
 - 🌐 **HTTP API** — REST endpoints for integration
 - 📊 **Audit logs** — full traceability of every action
 - 🧪 **Thoroughly tested** — unit, integration, and benchmark tests
@@ -52,10 +52,10 @@ cd raven-ai-harness
 cargo build --release
 
 # Run a task
-cargo run -- run --goal "Create a hello world program in Python" --provider openai_compat
+cargo run -- run "Create a hello world program in Python"
 
 # Start the HTTP API
-cargo run -- serve --port 9177
+cargo run -- serve
 ```
 
 ### Configuration

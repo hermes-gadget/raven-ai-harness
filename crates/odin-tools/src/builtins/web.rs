@@ -382,10 +382,10 @@ mod tests {
         });
         let result = fetch.execute(args, &test_context()).await;
         // May fail due to network or return HTTP error - either is acceptable
-        if let Ok(res) = result {
-            if !res.success {
-                assert!(res.error.unwrap().contains("HTTP"));
-            }
+        if let Ok(res) = result
+            && !res.success
+        {
+            assert!(res.error.unwrap().contains("HTTP"));
         }
     }
 

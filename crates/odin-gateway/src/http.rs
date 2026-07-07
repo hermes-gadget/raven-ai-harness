@@ -28,16 +28,10 @@ pub type TaskHandlerFn = Arc<
 >;
 
 /// Shared state for the HTTP server.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct GatewayState {
     /// Optional handler for processing chat/task requests.
     pub task_handler: Option<TaskHandlerFn>,
-}
-
-impl Default for GatewayState {
-    fn default() -> Self {
-        Self { task_handler: None }
-    }
 }
 
 // ── Request / Response Types ─────────────────────────────────────────

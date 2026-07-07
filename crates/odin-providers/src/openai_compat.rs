@@ -1,14 +1,11 @@
 //! OpenAI-compatible provider (works with OpenAI, Ollama, vLLM, Groq, DeepSeek, etc.)
 
 use async_trait::async_trait;
-use futures::Stream;
 use odin_core::error::{OdinError, OdinResult};
 use odin_core::traits::{ChatStream, Provider};
 use odin_core::types::*;
 use reqwest::Client;
 use serde_json::Value;
-use std::pin::Pin;
-use std::task::{Context as TaskContext, Poll};
 
 /// Provider for any OpenAI-compatible API endpoint.
 pub struct OpenAiCompatProvider {
@@ -140,7 +137,7 @@ impl Provider for OpenAiCompatProvider {
     }
 
     async fn list_models(&self) -> OdinResult<Vec<ModelInfo>> {
-        let mut req = self.client.get(&self.models_url());
+        let mut req = self.client.get(self.models_url());
         if let Some(ref key) = self.api_key {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
@@ -180,7 +177,7 @@ impl Provider for OpenAiCompatProvider {
     ) -> OdinResult<ChatResponse> {
         let body = self.build_request(model, messages, tools, options);
 
-        let mut req = self.client.post(&self.chat_url()).json(&body);
+        let mut req = self.client.post(self.chat_url()).json(&body);
         if let Some(ref key) = self.api_key {
             req = req.header("Authorization", format!("Bearer {}", key));
         }

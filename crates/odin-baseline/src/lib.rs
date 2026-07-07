@@ -23,7 +23,7 @@ use std::sync::Arc;
 pub struct BaselineAgent {
     provider: Arc<dyn Provider>,
     tools: Vec<ToolSchema>,
-    max_iterations: u32,
+    _max_iterations: u32,
     /// Simulated token cost per prompt (for comparison)
     tokens_per_prompt: u32,
     tokens_per_completion: u32,
@@ -34,7 +34,7 @@ impl BaselineAgent {
         Self {
             provider,
             tools,
-            max_iterations,
+            _max_iterations: max_iterations,
             tokens_per_prompt: 0,
             tokens_per_completion: 0,
         }
@@ -69,7 +69,7 @@ impl LoopEngineTrait for BaselineAgent {
         let model = "default";
         let options = CompletionOptions::default();
         let mut total_tool_calls: u32 = 0;
-        let mut success = false;
+        let success = false;
 
         for iteration in 1..=task.max_iterations {
             // Estimate token usage
@@ -104,7 +104,6 @@ impl LoopEngineTrait for BaselineAgent {
 
             if tool_calls.is_empty() {
                 // No tool calls — assume done
-                success = true;
                 let duration_ms = start.elapsed().as_millis() as u64;
                 return Ok(TaskResult {
                     task_id: task.id,

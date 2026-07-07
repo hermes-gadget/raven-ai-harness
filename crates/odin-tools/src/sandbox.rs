@@ -52,18 +52,18 @@ impl Sandbox {
     /// and the final component is appended.
     fn resolve(&self, path: &Path) -> OdinResult<PathBuf> {
         if path.exists() {
-            return path.canonicalize().map_err(|e| OdinError::Io(e));
+            return path.canonicalize().map_err(OdinError::Io);
         }
 
         // Path doesn't exist — try resolving the parent chain
-        if let Some(parent) = path.parent() {
-            if parent.exists() {
-                let mut canonical = parent.canonicalize().map_err(|e| OdinError::Io(e))?;
-                if let Some(filename) = path.file_name() {
-                    canonical.push(filename);
-                }
-                return Ok(canonical);
+        if let Some(parent) = path.parent()
+            && parent.exists()
+        {
+            let mut canonical = parent.canonicalize().map_err(OdinError::Io)?;
+            if let Some(filename) = path.file_name() {
+                canonical.push(filename);
             }
+            return Ok(canonical);
         }
 
         // Fall back to an absolute path constructed from working-dir assumptions

@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use odin_core::config::OdinConfig;
+use odin_core::traits::AuditLogger;
 use odin_core::types::AgentTask;
 use odin_runtime::{Agent, Runtime};
 use tracing_subscriber::EnvFilter;
@@ -189,8 +190,26 @@ async fn cmd_run(
     let agent = Agent::new("default-agent", Arc::new(engine), provider, tools);
     let agent_id = agent.id;
 
-    // Register agent in runtime
-    let runtime = Runtime::new().with_default_max_iterations(max_iterations);
+    // Wire persistent memory store
+    let memory = Arc::new(
+        odin_memory::SqliteMemoryStore::new(&config.general.instance_name).unwrap_or_else(|_| {
+            tracing::warn!("[CLI] Failed to create memory store, using in-memory fallback");
+            odin_memory::SqliteMemoryStore::in_memory().expect("in-memory store should never fail")
+        }),
+    );
+    tracing::info!("[CLI] Memory store initialized");
+
+    // Wire audit logger
+    let audit_logger = Arc::new(odin_audit::AuditLoggerImpl::with_file(format!(
+        "{}.audit.jsonl",
+        config.general.instance_name
+    )));
+    tracing::info!("[CLI] Audit logger initialized");
+
+    // Register agent in runtime with memory store
+    let runtime = Runtime::new()
+        .with_memory(memory)
+        .with_default_max_iterations(max_iterations);
     runtime.register_agent(agent);
     let session = runtime.create_session_with_label("cli-run");
 
@@ -205,6 +224,24 @@ async fn cmd_run(
         created_at: chrono::Utc::now(),
     };
 
+    // Log task start
+    let start_entry = odin_core::types::AuditEntry {
+        id: uuid::Uuid::new_v4(),
+        timestamp: chrono::Utc::now(),
+        agent_id,
+        session_id: session.id,
+        event_type: odin_core::types::AuditEventType::SessionStart,
+        action: "cli_run".to_string(),
+        details: serde_json::json!({
+            "task": task,
+            "max_iterations": max_iterations,
+        }),
+        result: odin_core::types::AuditResult::Success,
+    };
+    if let Err(e) = audit_logger.log(start_entry).await {
+        tracing::warn!("[CLI] Failed to log audit start: {e}");
+    }
+
     // Submit the task
     tracing::info!("[CLI] Submitting task '{}' to agent 'default-agent'", task);
     let start = std::time::Instant::now();
@@ -212,6 +249,31 @@ async fn cmd_run(
         .submit_task(&agent_id, &agent_task, Some(session.id))
         .await?;
     let elapsed = start.elapsed();
+
+    // Log task end
+    let end_entry = odin_core::types::AuditEntry {
+        id: uuid::Uuid::new_v4(),
+        timestamp: chrono::Utc::now(),
+        agent_id,
+        session_id: session.id,
+        event_type: odin_core::types::AuditEventType::SessionEnd,
+        action: "cli_run_complete".to_string(),
+        details: serde_json::json!({
+            "success": result.success,
+            "iterations": result.iterations,
+            "duration_ms": elapsed.as_millis(),
+            "tool_calls": result.tool_calls,
+            "confidence": result.confidence,
+        }),
+        result: if result.success {
+            odin_core::types::AuditResult::Success
+        } else {
+            odin_core::types::AuditResult::Failure
+        },
+    };
+    if let Err(e) = audit_logger.log(end_entry).await {
+        tracing::warn!("[CLI] Failed to log audit end: {e}");
+    }
 
     // Print the result
     println!();
@@ -312,12 +374,32 @@ async fn cmd_serve(addr: String, config_path: Option<PathBuf>) -> anyhow::Result
         .filter_map(|s| tool_registry.get(&s.function.name))
         .collect();
 
+    // Wire persistent memory store
+    let memory = Arc::new(
+        odin_memory::SqliteMemoryStore::new(&config.general.instance_name).unwrap_or_else(|_| {
+            tracing::warn!("[CLI/serve] Failed to create memory store, using in-memory fallback");
+            odin_memory::SqliteMemoryStore::in_memory().expect("in-memory store should never fail")
+        }),
+    );
+    tracing::info!("[CLI/serve] Memory store initialized");
+
+    // Wire audit logger
+    let audit_logger = Arc::new(odin_audit::AuditLoggerImpl::with_file(format!(
+        "{}.audit.jsonl",
+        config.general.instance_name
+    )));
+    tracing::info!("[CLI/serve] Audit logger initialized");
+
     // Build the task handler closure
     let handler: odin_gateway::TaskHandlerFn = {
+        let memory = memory;
+        let audit_logger = audit_logger;
         Arc::new(move |req: odin_gateway::ChatRequest| {
             let provider = provider.clone();
             let tool_registry = tool_registry.clone();
             let tools = tools.clone();
+            let memory = memory.clone();
+            let audit_logger = audit_logger.clone();
             Box::pin(async move {
                 let start = std::time::Instant::now();
 
@@ -334,7 +416,7 @@ async fn cmd_serve(addr: String, config_path: Option<PathBuf>) -> anyhow::Result
                 );
                 let agent_id = agent.id;
 
-                let runtime = Runtime::new();
+                let runtime = Runtime::new().with_memory(memory.clone());
                 runtime.register_agent(agent);
 
                 // Parse session_id if provided
@@ -353,12 +435,55 @@ async fn cmd_serve(addr: String, config_path: Option<PathBuf>) -> anyhow::Result
                     created_at: chrono::Utc::now(),
                 };
 
+                // Log task start
+                let start_entry = odin_core::types::AuditEntry {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    agent_id,
+                    session_id: session_id.unwrap_or_default(),
+                    event_type: odin_core::types::AuditEventType::SessionStart,
+                    action: "serve_run".to_string(),
+                    details: serde_json::json!({
+                        "task": req.task,
+                        "max_iterations": req.max_iterations.unwrap_or(100),
+                    }),
+                    result: odin_core::types::AuditResult::Success,
+                };
+                if let Err(e) = audit_logger.log(start_entry).await {
+                    tracing::warn!("[CLI/serve] Failed to log audit start: {e}");
+                }
+
                 let result = runtime
                     .submit_task(&agent_id, &runtime_task, session_id)
                     .await
                     .map_err(|e| odin_core::error::OdinError::Internal(e.to_string()))?;
 
                 let elapsed = start.elapsed().as_millis() as u64;
+
+                // Log task end
+                let end_entry = odin_core::types::AuditEntry {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    agent_id,
+                    session_id: result.task_id,
+                    event_type: odin_core::types::AuditEventType::SessionEnd,
+                    action: "serve_run_complete".to_string(),
+                    details: serde_json::json!({
+                        "success": result.success,
+                        "iterations": result.iterations,
+                        "duration_ms": elapsed,
+                        "tool_calls": result.tool_calls,
+                        "confidence": result.confidence,
+                    }),
+                    result: if result.success {
+                        odin_core::types::AuditResult::Success
+                    } else {
+                        odin_core::types::AuditResult::Failure
+                    },
+                };
+                if let Err(e) = audit_logger.log(end_entry).await {
+                    tracing::warn!("[CLI/serve] Failed to log audit end: {e}");
+                }
 
                 Ok(odin_gateway::ChatResponse {
                     success: result.success,

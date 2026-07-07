@@ -163,10 +163,9 @@ impl Skill {
             enabled: self.enabled,
         };
         let fm_str = serde_yaml::to_string(&fm).map_err(|e| {
-            OdinError::Serialization(serde_json::Error::io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to serialize frontmatter: {e}"),
-            )))
+            OdinError::Serialization(serde_json::Error::io(std::io::Error::other(format!(
+                "Failed to serialize frontmatter: {e}"
+            ))))
         })?;
         Ok(format!("---\n{}---\n{}", fm_str, self.content))
     }

@@ -1,6 +1,7 @@
 //! Comparative benchmark harness — Raven's looped engine vs naive baseline.
 //!
 //! Runs both agents through identical simulated tasks and measures:
+#![allow(clippy::manual_strip, clippy::if_same_then_else, dead_code)]
 //!   - Iterations used (fewer = more efficient)
 //!   - Estimated tokens consumed (fewer = cheaper)
 //!   - Success rate (higher = better)
@@ -472,38 +473,38 @@ impl ComparisonReport {
                 .iter()
                 .find(|r| r.agent_name == "baseline" && r.task.goal == run.task.goal);
 
-            if run.agent_name == "looped" {
-                if let Some(base) = baseline {
-                    let winner = if run.confidence > base.confidence {
-                        "RAVEN"
-                    } else if run.success && !base.success {
-                        "RAVEN"
-                    } else if run.estimated_tokens < base.estimated_tokens {
-                        "RAVEN"
-                    } else {
-                        "baseline"
-                    };
+            if run.agent_name == "looped"
+                && let Some(base) = baseline
+            {
+                let winner = if run.confidence > base.confidence {
+                    "RAVEN"
+                } else if run.success && !base.success {
+                    "RAVEN"
+                } else if run.estimated_tokens < base.estimated_tokens {
+                    "RAVEN"
+                } else {
+                    "baseline"
+                };
 
-                    let task_short = if run.task.goal.len() > 50 {
-                        format!("{}...", &run.task.goal[..47])
-                    } else {
-                        run.task.goal.clone()
-                    };
+                let task_short = if run.task.goal.len() > 50 {
+                    format!("{}...", &run.task.goal[..47])
+                } else {
+                    run.task.goal.clone()
+                };
 
-                    println!(
-                        "{:<55} {:>8} {:>10} {:>10} {:>10} {:>10}",
-                        task_short,
-                        if run.success { "✓" } else { "✗" },
-                        format!("{}/{}", run.iterations, base.iterations),
-                        format!("{}/{}", run.estimated_tokens, base.estimated_tokens),
-                        format!(
-                            "{:.1}/{:.1}",
-                            run.confidence * 100.0,
-                            base.confidence * 100.0
-                        ),
-                        winner,
-                    );
-                }
+                println!(
+                    "{:<55} {:>8} {:>10} {:>10} {:>10} {:>10}",
+                    task_short,
+                    if run.success { "✓" } else { "✗" },
+                    format!("{}/{}", run.iterations, base.iterations),
+                    format!("{}/{}", run.estimated_tokens, base.estimated_tokens),
+                    format!(
+                        "{:.1}/{:.1}",
+                        run.confidence * 100.0,
+                        base.confidence * 100.0
+                    ),
+                    winner,
+                );
             }
         }
     }
@@ -520,7 +521,7 @@ async fn run_comparison(model_type: &str, small_model: bool) -> ComparisonReport
     for task in &tasks {
         // ── Run with Raven's looped engine ──
         {
-            let mock = Arc::new(MockProvider::new("mock-loop", small_model, 0.3));
+            let _mock = Arc::new(MockProvider::new("mock-loop", small_model, 0.3));
             let engine = LoopEngine::new().with_max_iterations(30);
 
             let agent_task = AgentTask {
@@ -769,7 +770,7 @@ mod tests {
     #[tokio::test]
     async fn test_error_recovery() {
         // Run with high error rate on a small model
-        let mock = Arc::new(MockProvider::new("error-prone", true, 0.9));
+        let _mock = Arc::new(MockProvider::new("error-prone", true, 0.9));
         let engine = LoopEngine::new().with_max_iterations(15);
 
         let task = AgentTask {

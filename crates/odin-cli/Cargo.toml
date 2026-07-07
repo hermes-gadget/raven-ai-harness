@@ -15,8 +15,11 @@ odin-gateway = { workspace = true }
 odin-providers.workspace = true
 odin-loop.workspace = true
 odin-tools.workspace = true
+odin-audit.workspace = true
+odin-memory.workspace = true
 clap.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
 tracing.workspace = true

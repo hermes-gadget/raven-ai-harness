@@ -105,14 +105,17 @@ impl AuditLoggerImpl {
     }
 
     /// Create a new audit logger with default configuration.
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(AuditLoggerConfig::default())
     }
 
     /// Create the audit logger with a file-based output.
     pub fn with_file(path: impl Into<PathBuf>) -> Self {
-        let mut config = AuditLoggerConfig::default();
-        config.file_path = Some(path.into());
+        let config = AuditLoggerConfig {
+            file_path: Some(path.into()),
+            ..AuditLoggerConfig::default()
+        };
         Self::new(config)
     }
 
@@ -121,14 +124,11 @@ impl AuditLoggerImpl {
         // Create parent directories if needed
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                OdinError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!(
-                        "Failed to create audit log directory '{}': {}",
-                        parent.display(),
-                        e
-                    ),
-                ))
+                OdinError::Io(std::io::Error::other(format!(
+                    "Failed to create audit log directory '{}': {}",
+                    parent.display(),
+                    e
+                )))
             })?;
         }
 
@@ -137,10 +137,11 @@ impl AuditLoggerImpl {
             .append(true)
             .open(path)
             .map_err(|e| {
-                OdinError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to open audit log file '{}': {}", path.display(), e),
-                ))
+                OdinError::Io(std::io::Error::other(format!(
+                    "Failed to open audit log file '{}': {}",
+                    path.display(),
+                    e
+                )))
             })
     }
 
@@ -170,7 +171,7 @@ impl AuditLoggerImpl {
         let count = entries.len();
         for buffered in &entries {
             let line = if self.config.json_format {
-                serde_json::to_string(&buffered.entry).map_err(|e| OdinError::Serialization(e))?
+                serde_json::to_string(&buffered.entry).map_err(OdinError::Serialization)?
             } else {
                 format!(
                     "[{}] [{}] [{}] [{}] {}: {}\n",
@@ -184,18 +185,18 @@ impl AuditLoggerImpl {
             };
 
             writeln!(file, "{}", line).map_err(|e| {
-                OdinError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to write audit log entry: {}", e),
-                ))
+                OdinError::Io(std::io::Error::other(format!(
+                    "Failed to write audit log entry: {}",
+                    e
+                )))
             })?;
         }
 
         file.flush().map_err(|e| {
-            OdinError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to flush audit log: {}", e),
-            ))
+            OdinError::Io(std::io::Error::other(format!(
+                "Failed to flush audit log: {}",
+                e
+            )))
         })?;
 
         debug!(count = count, "Flushed audit entries to file");
@@ -221,10 +222,10 @@ impl AuditLoggerImpl {
         }
 
         // Flush if buffer is large enough
-        if self.buffer.read().await.len() >= self.config.buffer_size {
-            if let Err(e) = self.flush_to_file().await {
-                warn!(error = %e, "Failed to flush audit buffer to file");
-            }
+        if self.buffer.read().await.len() >= self.config.buffer_size
+            && let Err(e) = self.flush_to_file().await
+        {
+            warn!(error = %e, "Failed to flush audit buffer to file");
         }
 
         Ok(())
