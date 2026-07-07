@@ -18,7 +18,7 @@ pub struct GoalDecomposer {
 impl Default for GoalDecomposer {
     fn default() -> Self {
         Self {
-            max_sub_tasks: 10,
+            max_sub_tasks: 3,
             max_depth: 2,
         }
     }

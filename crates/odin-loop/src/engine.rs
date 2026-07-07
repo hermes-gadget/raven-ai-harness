@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use odin_core::error::OdinResult;
-use odin_core::traits::{LoopEngine as LoopEngineTrait, LoopState, PhaseResult};
+use odin_core::traits::{LoopEngine as LoopEngineTrait, LoopState, PhaseResult, Provider};
 use odin_core::types::*;
 use std::sync::Arc;
 
@@ -28,17 +28,26 @@ pub struct Engine {
     summarizer: StateSummarizer,
     /// Maximum total iterations across all phases
     max_iterations: u32,
+    /// Optional provider for LLM calls (phases use stubs if None)
+    provider: Option<Arc<dyn Provider>>,
 }
 
 impl Engine {
-    /// Create a new loop engine with default settings.
+    /// Create a new loop engine with default settings (no LLM provider — stub mode).
     pub fn new() -> Self {
         Self {
             confidence_scorer: ConfidenceScorer::default(),
             decomposer: GoalDecomposer::default(),
             summarizer: StateSummarizer::default(),
             max_iterations: 100,
+            provider: None,
         }
+    }
+
+    /// Attach a model provider for real LLM calls.
+    pub fn with_provider(mut self, provider: Arc<dyn Provider>) -> Self {
+        self.provider = Some(provider);
+        self
     }
 
     /// Set the maximum iterations.
@@ -111,6 +120,7 @@ impl LoopEngineTrait for Engine {
             decomposer: self.decomposer.clone(),
             summarizer: self.summarizer.clone(),
             plan: Some(plan.clone()),
+            provider: self.provider.clone(),
         };
 
         let mut total_tool_calls = 0u32;
@@ -197,6 +207,16 @@ impl LoopEngineTrait for Engine {
                                 }
                             }
 
+                            // Check if all sub-tasks are done
+                            let all_done = plan.sub_tasks.iter().all(|st| {
+                                st.status == SubTaskStatus::Completed
+                                    || st.status == SubTaskStatus::Failed
+                                    || st.status == SubTaskStatus::Skipped
+                            });
+                            if all_done {
+                                break;
+                            }
+
                             state.current_phase = LoopPhase::Act;
                             continue;
                         }
@@ -245,6 +265,7 @@ impl LoopEngineTrait for Engine {
             decomposer: self.decomposer.clone(),
             summarizer: self.summarizer.clone(),
             plan: None,
+            provider: self.provider.clone(),
         };
 
         match phase {
