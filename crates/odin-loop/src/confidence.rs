@@ -80,11 +80,7 @@ impl ConfidenceScorer {
     /// - Presence of error indicators ("error", "failed", "sorry")
     /// - Presence of confidence indicators ("I'm confident", "definitely")
     /// - Whether it addresses the goal
-    pub fn score_text_response(
-        &self,
-        response: &str,
-        goal_hint: Option<&str>,
-    ) -> ConfidenceScore {
+    pub fn score_text_response(&self, response: &str, goal_hint: Option<&str>) -> ConfidenceScore {
         let mut score = 0.5; // Start at neutral
 
         let lower = response.to_lowercase();
@@ -102,17 +98,37 @@ impl ConfidenceScorer {
         }
 
         // Error indicators
-        let error_words = ["error", "failed", "unable", "cannot", "sorry", "apologize",
-            "unfortunately", "not able", "doesn't work", "not possible"];
+        let error_words = [
+            "error",
+            "failed",
+            "unable",
+            "cannot",
+            "sorry",
+            "apologize",
+            "unfortunately",
+            "not able",
+            "doesn't work",
+            "not possible",
+        ];
         let error_count = error_words.iter().filter(|w| lower.contains(*w)).count();
         if error_count > 0 {
             score -= 0.1 * (error_count.min(3) as f64);
         }
 
         // Confidence indicators
-        let confidence_words = ["confident", "definitely", "certainly", "clearly",
-            "successfully", "correct", "verified"];
-        let conf_count = confidence_words.iter().filter(|w| lower.contains(*w)).count();
+        let confidence_words = [
+            "confident",
+            "definitely",
+            "certainly",
+            "clearly",
+            "successfully",
+            "correct",
+            "verified",
+        ];
+        let conf_count = confidence_words
+            .iter()
+            .filter(|w| lower.contains(*w))
+            .count();
         if conf_count > 0 {
             score += 0.05 * (conf_count.min(4) as f64);
         }

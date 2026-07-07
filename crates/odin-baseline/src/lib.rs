@@ -56,7 +56,9 @@ impl LoopEngineTrait for BaselineAgent {
         let start = std::time::Instant::now();
 
         let mut messages = vec![
-            Message::system("You are an AI assistant. Complete the user's task using available tools."),
+            Message::system(
+                "You are an AI assistant. Complete the user's task using available tools.",
+            ),
             Message::user(format!("Goal: {}", task.goal)),
         ];
 
@@ -96,10 +98,7 @@ impl LoopEngineTrait for BaselineAgent {
                 }
             };
 
-            let tool_calls: Vec<ToolCall> = response
-                .message
-                .tool_calls()
-                .to_vec();
+            let tool_calls: Vec<ToolCall> = response.message.tool_calls().to_vec();
             let response_text = response.message.text().map(|s| s.to_string());
             messages.push(response.message);
 

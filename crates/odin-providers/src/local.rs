@@ -96,14 +96,9 @@ impl Provider for LocalProvider {
         _options: &CompletionOptions,
     ) -> OdinResult<ChatResponse> {
         // Delegate to OpenAI-compatible API (most local servers support this)
-        let openai_compat = crate::openai_compat::OpenAiCompatProvider::new(
-            "local-compat",
-            &self.base_url,
-            None,
-        );
-        openai_compat
-            .chat(model, messages, _tools, _options)
-            .await
+        let openai_compat =
+            crate::openai_compat::OpenAiCompatProvider::new("local-compat", &self.base_url, None);
+        openai_compat.chat(model, messages, _tools, _options).await
     }
 
     async fn chat_stream(
@@ -113,7 +108,10 @@ impl Provider for LocalProvider {
         _tools: &[ToolSchema],
         _options: &CompletionOptions,
     ) -> OdinResult<Box<dyn ChatStream>> {
-        Err(OdinError::provider("local", "Streaming not yet implemented"))
+        Err(OdinError::provider(
+            "local",
+            "Streaming not yet implemented",
+        ))
     }
 
     async fn health_check(&self) -> OdinResult<bool> {

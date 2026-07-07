@@ -48,11 +48,7 @@ impl Agent {
 
     /// Execute a task through the agent's loop engine.
     pub async fn execute_task(&self, task: &AgentTask) -> OdinResult<TaskResult> {
-        tracing::info!(
-            "[AGENT {}] Executing task: {}",
-            self.name,
-            task.goal
-        );
+        tracing::info!("[AGENT {}] Executing task: {}", self.name, task.goal);
         self.engine.execute_task(task).await
     }
 
@@ -193,8 +189,12 @@ mod tests {
         struct MockTool;
         #[async_trait]
         impl Tool for MockTool {
-            fn name(&self) -> &str { "mock-tool" }
-            fn description(&self) -> &str { "A mock tool" }
+            fn name(&self) -> &str {
+                "mock-tool"
+            }
+            fn description(&self) -> &str {
+                "A mock tool"
+            }
             fn schema(&self) -> odin_core::types::ToolSchema {
                 odin_core::types::ToolSchema {
                     schema_type: "function".into(),
@@ -205,7 +205,11 @@ mod tests {
                     },
                 }
             }
-            async fn execute(&self, _args: serde_json::Value, _context: &odin_core::traits::ToolContext) -> OdinResult<odin_core::types::ToolResult> {
+            async fn execute(
+                &self,
+                _args: serde_json::Value,
+                _context: &odin_core::traits::ToolContext,
+            ) -> OdinResult<odin_core::types::ToolResult> {
                 unimplemented!()
             }
         }

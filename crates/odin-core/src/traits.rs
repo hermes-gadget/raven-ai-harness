@@ -177,18 +177,11 @@ pub trait PermissionEngine: Send + Sync {
     ) -> OdinResult<PermissionAction>;
 
     /// Check if a shell command is allowed.
-    async fn check_command(
-        &self,
-        agent_id: AgentId,
-        command: &str,
-    ) -> OdinResult<PermissionAction>;
+    async fn check_command(&self, agent_id: AgentId, command: &str)
+    -> OdinResult<PermissionAction>;
 
     /// Check rate limits.
-    async fn check_rate_limit(
-        &self,
-        agent_id: AgentId,
-        tool_name: &str,
-    ) -> OdinResult<bool>;
+    async fn check_rate_limit(&self, agent_id: AgentId, tool_name: &str) -> OdinResult<bool>;
 
     /// Request user approval for an action (returns true if approved).
     async fn request_approval(

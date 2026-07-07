@@ -30,6 +30,10 @@ pub struct Engine {
     max_iterations: u32,
     /// Optional provider for LLM calls (phases use stubs if None)
     provider: Option<Arc<dyn Provider>>,
+    /// Optional stronger provider for escalation (used when confidence is low)
+    escalation_provider: Option<Arc<dyn Provider>>,
+    /// Optional tool registry for dispatching tool calls
+    tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
 }
 
 impl Engine {
@@ -41,12 +45,26 @@ impl Engine {
             summarizer: StateSummarizer::default(),
             max_iterations: 100,
             provider: None,
+            escalation_provider: None,
+            tool_registry: None,
         }
     }
 
     /// Attach a model provider for real LLM calls.
     pub fn with_provider(mut self, provider: Arc<dyn Provider>) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    /// Attach a stronger escalation provider for low-confidence scenarios.
+    pub fn with_escalation_provider(mut self, provider: Arc<dyn Provider>) -> Self {
+        self.escalation_provider = Some(provider);
+        self
+    }
+
+    /// Attach a tool registry for dispatching real tool calls.
+    pub fn with_tool_registry(mut self, registry: Arc<odin_tools::ToolRegistry>) -> Self {
+        self.tool_registry = Some(registry);
         self
     }
 
@@ -57,11 +75,7 @@ impl Engine {
     }
 
     /// Set custom confidence thresholds.
-    pub fn with_confidence_thresholds(
-        mut self,
-        low: f64,
-        high: f64,
-    ) -> Self {
+    pub fn with_confidence_thresholds(mut self, low: f64, high: f64) -> Self {
         self.confidence_scorer.low_threshold = low;
         self.confidence_scorer.high_threshold = high;
         self
@@ -89,7 +103,9 @@ impl LoopEngineTrait for Engine {
         let mut state = LoopState {
             task: task.clone(),
             messages: vec![
-                Message::system("You are an AI agent. Follow the plan, execute carefully, and verify results."),
+                Message::system(
+                    "You are an AI agent. Follow the plan, execute carefully, and verify results.",
+                ),
                 Message::user(format!("Goal: {}", task.goal)),
             ],
             tool_results: vec![],
@@ -100,7 +116,9 @@ impl LoopEngineTrait for Engine {
         };
 
         if let Some(ref ctx) = task.context {
-            state.messages.push(Message::system(format!("Context: {}", ctx)));
+            state
+                .messages
+                .push(Message::system(format!("Context: {}", ctx)));
         }
 
         // Decompose the goal
@@ -115,12 +133,14 @@ impl LoopEngineTrait for Engine {
         let verify_phase = VerifyPhase::new(self.confidence_scorer.clone());
         let decide_phase = DecidePhase;
 
-        let context = PhaseContext {
+        let mut context = PhaseContext {
             confidence_scorer: self.confidence_scorer.clone(),
             decomposer: self.decomposer.clone(),
             summarizer: self.summarizer.clone(),
             plan: Some(plan.clone()),
             provider: self.provider.clone(),
+            escalation_provider: self.escalation_provider.clone(),
+            tool_registry: self.tool_registry.clone(),
         };
 
         let mut total_tool_calls = 0u32;
@@ -166,7 +186,18 @@ impl LoopEngineTrait for Engine {
                         "[LOOP] Escalating — confidence too low ({:.0}%)",
                         last_confidence.value() * 100.0
                     );
-                    // In production: switch to escalation model
+                    // If we have an escalation provider, switch and retry
+                    if context.escalation_provider.is_some() && context.provider.is_some() {
+                        tracing::info!("[LOOP] Switching to escalation provider for retry");
+                        // Swap providers: escalation becomes primary for this retry
+                        let _ = std::mem::replace(
+                            &mut context.provider,
+                            context.escalation_provider.clone(),
+                        );
+                        state.current_phase = LoopPhase::Act;
+                        continue;
+                    }
+                    // No escalation provider available — give up
                     break;
                 }
                 LoopDecision::Retry => {
@@ -266,6 +297,8 @@ impl LoopEngineTrait for Engine {
             summarizer: self.summarizer.clone(),
             plan: None,
             provider: self.provider.clone(),
+            escalation_provider: self.escalation_provider.clone(),
+            tool_registry: self.tool_registry.clone(),
         };
 
         match phase {
@@ -389,9 +422,7 @@ mod tests {
             history: vec![],
         };
 
-        let result = engine
-            .execute_phase(LoopPhase::Plan, &mut state)
-            .await;
+        let result = engine.execute_phase(LoopPhase::Plan, &mut state).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().phase, LoopPhase::Plan);
     }

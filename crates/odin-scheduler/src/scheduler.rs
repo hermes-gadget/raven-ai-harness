@@ -6,12 +6,12 @@
 
 use crate::job::{Job, JobId, JobTask, Schedule};
 use chrono::Utc;
-use odin_core::error::OdinResult;
 use odin_core::config::SchedulerConfig;
+use odin_core::error::OdinResult;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
@@ -49,12 +49,7 @@ impl Scheduler {
     /// Add a job to the scheduler.
     ///
     /// Returns the assigned job ID.
-    pub async fn add_job(
-        &self,
-        name: &str,
-        schedule: &str,
-        task: JobTask,
-    ) -> OdinResult<JobId> {
+    pub async fn add_job(&self, name: &str, schedule: &str, task: JobTask) -> OdinResult<JobId> {
         let schedule = Schedule::parse(schedule).map_err(|e| {
             odin_core::error::OdinError::Config(format!("Invalid schedule '{}': {}", schedule, e))
         })?;

@@ -37,10 +37,7 @@ pub enum OdinError {
     ContextLimit { used: u32, limit: u32 },
 
     #[error("Loop error at phase {phase:?}: {message}")]
-    Loop {
-        phase: LoopPhase,
-        message: String,
-    },
+    Loop { phase: LoopPhase, message: String },
 
     #[error("Validation error: {0}")]
     Validation(String),
@@ -103,10 +100,7 @@ impl OdinError {
     }
 
     /// Create a provider error.
-    pub fn provider(
-        provider: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
+    pub fn provider(provider: impl Into<String>, message: impl Into<String>) -> Self {
         OdinError::Provider {
             provider: provider.into(),
             message: message.into(),

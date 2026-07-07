@@ -26,19 +26,16 @@ impl TryFrom<MemoryRow> for MemoryEntry {
     type Error = String;
 
     fn try_from(row: MemoryRow) -> Result<Self, Self::Error> {
-        let created_at: DateTime<Utc> =
-            DateTime::parse_from_rfc3339(&row.created_at)
-                .map_err(|e| format!("Invalid created_at: {e}"))?
-                .with_timezone(&Utc);
+        let created_at: DateTime<Utc> = DateTime::parse_from_rfc3339(&row.created_at)
+            .map_err(|e| format!("Invalid created_at: {e}"))?
+            .with_timezone(&Utc);
 
-        let updated_at: DateTime<Utc> =
-            DateTime::parse_from_rfc3339(&row.updated_at)
-                .map_err(|e| format!("Invalid updated_at: {e}"))?
-                .with_timezone(&Utc);
+        let updated_at: DateTime<Utc> = DateTime::parse_from_rfc3339(&row.updated_at)
+            .map_err(|e| format!("Invalid updated_at: {e}"))?
+            .with_timezone(&Utc);
 
         let tags: Vec<String> =
-            serde_json::from_str(&row.tags)
-                .map_err(|e| format!("Invalid tags JSON: {e}"))?;
+            serde_json::from_str(&row.tags).map_err(|e| format!("Invalid tags JSON: {e}"))?;
 
         let category: MemoryCategory =
             serde_json::from_value(serde_json::Value::String(row.category))
@@ -67,8 +64,7 @@ impl MemoryRow {
                 .unwrap_or_else(|_| "fact".to_string()),
             created_at: entry.created_at.to_rfc3339(),
             updated_at: entry.updated_at.to_rfc3339(),
-            tags: serde_json::to_string(&entry.tags)
-                .unwrap_or_else(|_| "[]".to_string()),
+            tags: serde_json::to_string(&entry.tags).unwrap_or_else(|_| "[]".to_string()),
             importance: entry.importance as f64,
         }
     }

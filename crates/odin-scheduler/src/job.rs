@@ -47,11 +47,7 @@ pub struct Job {
 
 impl Job {
     /// Create a new job with the given name, schedule, and task.
-    pub fn new(
-        name: impl Into<String>,
-        schedule: Schedule,
-        task: JobTask,
-    ) -> Self {
+    pub fn new(name: impl Into<String>, schedule: Schedule, task: JobTask) -> Self {
         let now = Utc::now();
         let next_run = schedule.next_occurrence(now);
         Self {
@@ -182,14 +178,15 @@ impl Schedule {
         while candidate <= deadline {
             if self.month.matches(candidate.month() as i32)
                 && self.day_of_month.matches(candidate.day() as i32)
-                && self.day_of_week.matches(candidate.weekday().num_days_from_sunday() as i32)
+                && self
+                    .day_of_week
+                    .matches(candidate.weekday().num_days_from_sunday() as i32)
                 && self.hour.matches(candidate.hour() as i32)
                 && self.minute.matches(candidate.minute() as i32)
             {
                 return Some(candidate);
             }
-            candidate = candidate
-                .checked_add_signed(chrono::TimeDelta::minutes(1))?;
+            candidate = candidate.checked_add_signed(chrono::TimeDelta::minutes(1))?;
         }
 
         None
@@ -201,7 +198,9 @@ impl Schedule {
             && self.hour.matches(dt.hour() as i32)
             && self.day_of_month.matches(dt.day() as i32)
             && self.month.matches(dt.month() as i32)
-            && self.day_of_week.matches(dt.weekday().num_days_from_sunday() as i32)
+            && self
+                .day_of_week
+                .matches(dt.weekday().num_days_from_sunday() as i32)
     }
 }
 
@@ -237,9 +236,9 @@ impl CronField {
 
         // Check for step: */5 or 1-10/2
         if let Some((base, step)) = input.split_once('/') {
-            let step_val = step.parse::<i32>().map_err(|_| {
-                format!("Invalid step value '{}' in field '{}'", step, input)
-            })?;
+            let step_val = step
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid step value '{}' in field '{}'", step, input))?;
             if step_val <= 0 {
                 return Err(format!("Step must be positive in field '{}'", input));
             }
@@ -248,24 +247,25 @@ impl CronField {
             }
             // Range with step: 1-10/2
             if let Some((start, end)) = base.split_once('-') {
-                let start_val = start.parse::<i32>().map_err(|_| {
-                    format!("Invalid range start '{}' in field '{}'", start, input)
-                })?;
-                let _end_val = end.parse::<i32>().map_err(|_| {
-                    format!("Invalid range end '{}' in field '{}'", end, input)
-                })?;
+                let start_val = start
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid range start '{}' in field '{}'", start, input))?;
+                let _end_val = end
+                    .parse::<i32>()
+                    .map_err(|_| format!("Invalid range end '{}' in field '{}'", end, input))?;
                 return Ok(CronField::Step(start_val, step_val));
             }
             // Single value with step (unusual but supported)
-            let val = base.parse::<i32>().map_err(|_| {
-                format!("Invalid value '{}' in field '{}'", base, input)
-            })?;
+            let val = base
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid value '{}' in field '{}'", base, input))?;
             return Ok(CronField::Step(val, step_val));
         }
 
         // Check for list: 1,3,5
         if input.contains(',') {
-            let values: Result<Vec<i32>, _> = input.split(',').map(|s| s.trim().parse::<i32>()).collect();
+            let values: Result<Vec<i32>, _> =
+                input.split(',').map(|s| s.trim().parse::<i32>()).collect();
             let values = values.map_err(|_| format!("Invalid list value in field '{}'", input))?;
             // Validate range
             for &v in &values {
@@ -281,19 +281,19 @@ impl CronField {
 
         // Check for range: 1-5
         if let Some((start, end)) = input.split_once('-') {
-            let start_val = start.parse::<i32>().map_err(|_| {
-                format!("Invalid range start '{}' in field '{}'", start, input)
-            })?;
-            let end_val = end.parse::<i32>().map_err(|_| {
-                format!("Invalid range end '{}' in field '{}'", end, input)
-            })?;
+            let start_val = start
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid range start '{}' in field '{}'", start, input))?;
+            let end_val = end
+                .parse::<i32>()
+                .map_err(|_| format!("Invalid range end '{}' in field '{}'", end, input))?;
             return Ok(CronField::Range(start_val, end_val));
         }
 
         // Single value
-        let val = input.parse::<i32>().map_err(|_| {
-            format!("Invalid value '{}' in field '{}'", input, input)
-        })?;
+        let val = input
+            .parse::<i32>()
+            .map_err(|_| format!("Invalid value '{}' in field '{}'", input, input))?;
         if val < min || val > max {
             return Err(format!(
                 "Value {} out of range [{}, {}] in field '{}'",

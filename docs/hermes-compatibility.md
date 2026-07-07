@@ -1,5 +1,7 @@
 # Raven vs Hermes — Feature Compatibility
 
+> **Status reflects code as of 2026-07-07.**
+
 This document tracks which Hermes Agent features are matched, improved,
 deferred, or intentionally changed in Raven.
 
@@ -10,6 +12,7 @@ deferred, or intentionally changed in Raven.
 - ⏳ **Deferred** — Planned for a future version
 - ❌ **Removed** — Intentionally not included
 - 🔄 **Changed** — Different approach, same goal
+- ⚠️ **Partial/Stub** — Exists in skeleton form but not fully wired
 
 ## Feature Matrix
 
@@ -63,7 +66,7 @@ deferred, or intentionally changed in Raven.
 | Command approval | ✅ Matched | Interactive approval for dangerous commands |
 | Permission rules | ✅ Matched | Allow/deny/ask-user per tool |
 | Rate limiting | ✅ Matched | Per-tool, per-session rate limits |
-| Audit trail | ✅ Matched | Full logging of every action |
+| Audit trail | ⚠️ Partial/Stub | Logger exists in `odin-audit`, not wired to runtime |
 | Secret handling | ✅ Matched | Secrets in config, never sent to models |
 | Sandboxing | ✅ Matched | Optional container/chroot execution |
 | PII redaction | ⏳ Deferred | Planned for v0.2 |
@@ -72,7 +75,7 @@ deferred, or intentionally changed in Raven.
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Cron scheduling | ✅ Matched | `odin-scheduler` with cron expressions |
+| Cron scheduling | ⚠️ Partial/Stub | `odin-scheduler` exists but not wired to CLI/runtime |
 | Job management | ✅ Matched | Add/remove/pause/resume jobs |
 | Webhooks | ⏳ Deferred | Planned for v0.2 |
 | Long-running goals | ✅ Matched | Scheduler + loop engine |
@@ -83,8 +86,8 @@ deferred, or intentionally changed in Raven.
 |---------|--------|-------|
 | CLI | ✅ Matched | `odin-cli` with clap |
 | HTTP API | ✅ Matched | `odin-gateway` with axum |
-| Discord integration | ✅ Matched | Discord bot in `odin-gateway` |
-| WebSocket | ⏳ Deferred | Stub exists, full impl v0.2 |
+| Discord integration | ⚠️ Partial/Stub | Stub exists in `odin-gateway`, needs wiring |
+| WebSocket | ⚠️ Partial/Stub | Stub exists in `odin-gateway`, not fully wired |
 | Web dashboard | ⏳ Deferred | Planned for v0.3 |
 | Telegram | ⏳ Deferred | Planned for v0.2 |
 | Slack | ⏳ Deferred | Planned for v0.3 |

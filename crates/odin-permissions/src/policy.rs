@@ -128,15 +128,13 @@ impl PolicyEngine {
 
     /// Check if a shell command matches any dangerous pattern.
     pub fn is_dangerous_command(&self, command: &str) -> bool {
-        self.dangerous_patterns.iter().any(|re| re.is_match(command))
+        self.dangerous_patterns
+            .iter()
+            .any(|re| re.is_match(command))
     }
 
     /// Validate that a path is within the allowed boundaries.
-    pub fn check_path_boundary(
-        &self,
-        path: &std::path::Path,
-        write: bool,
-    ) -> OdinResult<()> {
+    pub fn check_path_boundary(&self, path: &std::path::Path, write: bool) -> OdinResult<()> {
         let path_str = path.to_string_lossy();
 
         // Check denied paths first
@@ -239,11 +237,7 @@ impl odin_core::traits::PermissionEngine for PolicyEngine {
     }
 
     /// Check rate limits for a specific agent and tool.
-    async fn check_rate_limit(
-        &self,
-        agent_id: AgentId,
-        tool_name: &str,
-    ) -> OdinResult<bool> {
+    async fn check_rate_limit(&self, agent_id: AgentId, tool_name: &str) -> OdinResult<bool> {
         let key = format!("{}:{}", agent_id, tool_name);
 
         // Determine max rate for this tool
@@ -408,12 +402,16 @@ mod tests {
         };
         let engine = PolicyEngine::new(vec![], &[], boundary, 60, true);
 
-        assert!(engine
-            .check_path_boundary(std::path::Path::new("/home/user/docs/file.txt"), false)
-            .is_ok());
-        assert!(engine
-            .check_path_boundary(std::path::Path::new("/home/user/docs/file.txt"), true)
-            .is_ok());
+        assert!(
+            engine
+                .check_path_boundary(std::path::Path::new("/home/user/docs/file.txt"), false)
+                .is_ok()
+        );
+        assert!(
+            engine
+                .check_path_boundary(std::path::Path::new("/home/user/docs/file.txt"), true)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -425,9 +423,11 @@ mod tests {
         };
         let engine = PolicyEngine::new(vec![], &[], boundary, 60, true);
 
-        assert!(engine
-            .check_path_boundary(std::path::Path::new("/etc/passwd"), false)
-            .is_err());
+        assert!(
+            engine
+                .check_path_boundary(std::path::Path::new("/etc/passwd"), false)
+                .is_err()
+        );
     }
 
     #[test]
@@ -439,12 +439,16 @@ mod tests {
         };
         let engine = PolicyEngine::new(vec![], &[], boundary, 60, true);
 
-        assert!(engine
-            .check_path_boundary(std::path::Path::new("/etc/config"), false)
-            .is_err());
-        assert!(engine
-            .check_path_boundary(std::path::Path::new("/etc/config"), true)
-            .is_err());
+        assert!(
+            engine
+                .check_path_boundary(std::path::Path::new("/etc/config"), false)
+                .is_err()
+        );
+        assert!(
+            engine
+                .check_path_boundary(std::path::Path::new("/etc/config"), true)
+                .is_err()
+        );
     }
 
     #[test]
@@ -456,11 +460,15 @@ mod tests {
         };
         let engine = PolicyEngine::new(vec![], &[], boundary, 60, true);
 
-        assert!(engine
-            .check_path_boundary(std::path::Path::new("./src/main.rs"), false)
-            .is_ok());
-        assert!(engine
-            .check_path_boundary(std::path::Path::new("../outside"), false)
-            .is_err());
+        assert!(
+            engine
+                .check_path_boundary(std::path::Path::new("./src/main.rs"), false)
+                .is_ok()
+        );
+        assert!(
+            engine
+                .check_path_boundary(std::path::Path::new("../outside"), false)
+                .is_err()
+        );
     }
 }

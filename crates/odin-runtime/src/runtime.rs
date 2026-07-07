@@ -1,7 +1,9 @@
 //! Runtime — orchestrates multiple agents, manages sessions, and spawns sub-agents.
 
 use dashmap::DashMap;
+use odin_core::config::OdinConfig;
 use odin_core::error::OdinResult;
+use odin_core::traits::MemoryStore;
 use odin_core::types::{AgentId, AgentTask, SessionId, TaskResult};
 use std::sync::Arc;
 
@@ -15,6 +17,7 @@ use crate::session::Session;
 /// - Tracks multiple sessions with their message history
 /// - Provides sub-agent spawning for parallel task execution
 /// - Task submission and result collection
+/// - Optional persistent memory via MemoryStore
 pub struct Runtime {
     /// Active sessions, keyed by SessionId.
     sessions: Arc<DashMap<SessionId, Session>>,
@@ -27,6 +30,9 @@ pub struct Runtime {
 
     /// Default max iterations for tasks.
     default_max_iterations: u32,
+
+    /// Optional persistent memory store.
+    memory: Option<Arc<dyn MemoryStore>>,
 }
 
 impl Default for Runtime {
@@ -43,7 +49,14 @@ impl Runtime {
             agents: Arc::new(DashMap::new()),
             sub_agents: Arc::new(DashMap::new()),
             default_max_iterations: 100,
+            memory: None,
         }
+    }
+
+    /// Attach a persistent memory store.
+    pub fn with_memory(mut self, memory: Arc<dyn MemoryStore>) -> Self {
+        self.memory = Some(memory);
+        self
     }
 
     /// Set the default max iterations.
@@ -86,10 +99,7 @@ impl Runtime {
 
     /// List all active sessions.
     pub fn list_sessions(&self) -> Vec<Session> {
-        self.sessions
-            .iter()
-            .map(|s| s.clone())
-            .collect()
+        self.sessions.iter().map(|s| s.clone()).collect()
     }
 
     /// Get the number of active sessions.
@@ -102,11 +112,7 @@ impl Runtime {
     /// Register an agent with the runtime.
     pub fn register_agent(&self, agent: Agent) {
         let id = agent.id;
-        tracing::info!(
-            "[RUNTIME] Registered agent '{}' ({})",
-            agent.name,
-            id
-        );
+        tracing::info!("[RUNTIME] Registered agent '{}' ({})", agent.name, id);
         self.agents.insert(id, agent);
     }
 
@@ -152,14 +158,9 @@ impl Runtime {
         task: &AgentTask,
         session_id: Option<SessionId>,
     ) -> OdinResult<TaskResult> {
-        let agent = self
-            .agents
-            .get(agent_id)
-            .ok_or_else(|| {
-                odin_core::error::OdinError::Internal(format!(
-                    "Agent {agent_id} not found"
-                ))
-            })?;
+        let agent = self.agents.get(agent_id).ok_or_else(|| {
+            odin_core::error::OdinError::Internal(format!("Agent {agent_id} not found"))
+        })?;
 
         tracing::info!(
             "[RUNTIME] Submitting task '{}' to agent '{}'",
@@ -172,9 +173,10 @@ impl Runtime {
         // If a session is provided, record the task result
         if let Some(sid) = session_id {
             if let Some(mut session) = self.sessions.get_mut(&sid) {
-                session.add_message(odin_core::types::Message::system(
-                    format!("Task result: {}", result.summary),
-                ));
+                session.add_message(odin_core::types::Message::system(format!(
+                    "Task result: {}",
+                    result.summary
+                )));
             }
         }
 
@@ -187,10 +189,7 @@ impl Runtime {
     ///
     /// Returns the sub-agent's ID. The caller can poll for completion
     /// using `get_sub_agent_result`.
-    pub fn spawn_sub_agent(
-        &self,
-        agent: Agent,
-    ) -> AgentId {
+    pub fn spawn_sub_agent(&self, agent: Agent) -> AgentId {
         let id = agent.id;
         self.sub_agents.insert(id, agent);
         tracing::info!(
@@ -266,6 +265,7 @@ impl Clone for Runtime {
             agents: self.agents.clone(),
             sub_agents: self.sub_agents.clone(),
             default_max_iterations: self.default_max_iterations,
+            memory: self.memory.clone(),
         }
     }
 }
@@ -318,11 +318,33 @@ mod tests {
 
     #[async_trait]
     impl odin_core::traits::Provider for MockProvider {
-        fn name(&self) -> &str { "mock" }
-        async fn list_models(&self) -> OdinResult<Vec<ModelInfo>> { Ok(vec![]) }
-        async fn chat(&self, _model: &str, _messages: &[Message], _tools: &[ToolSchema], _options: &CompletionOptions) -> OdinResult<ChatResponse> { unimplemented!() }
-        async fn chat_stream(&self, _model: &str, _messages: &[Message], _tools: &[ToolSchema], _options: &CompletionOptions) -> OdinResult<Box<dyn odin_core::traits::ChatStream>> { unimplemented!() }
-        async fn health_check(&self) -> OdinResult<bool> { Ok(true) }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn list_models(&self) -> OdinResult<Vec<ModelInfo>> {
+            Ok(vec![])
+        }
+        async fn chat(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSchema],
+            _options: &CompletionOptions,
+        ) -> OdinResult<ChatResponse> {
+            unimplemented!()
+        }
+        async fn chat_stream(
+            &self,
+            _model: &str,
+            _messages: &[Message],
+            _tools: &[ToolSchema],
+            _options: &CompletionOptions,
+        ) -> OdinResult<Box<dyn odin_core::traits::ChatStream>> {
+            unimplemented!()
+        }
+        async fn health_check(&self) -> OdinResult<bool> {
+            Ok(true)
+        }
     }
 
     fn make_agent(name: &str) -> Agent {

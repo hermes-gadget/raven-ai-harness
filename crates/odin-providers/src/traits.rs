@@ -15,10 +15,7 @@ pub trait ProviderExt: Provider {
         system_prompt: &str,
         user_message: &str,
     ) -> OdinResult<String> {
-        let messages = vec![
-            Message::system(system_prompt),
-            Message::user(user_message),
-        ];
+        let messages = vec![Message::system(system_prompt), Message::user(user_message)];
         let options = CompletionOptions::default();
         let response = self.chat(model, &messages, &[], &options).await?;
         Ok(response.message.text().unwrap_or("").to_string())

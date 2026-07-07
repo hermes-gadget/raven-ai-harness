@@ -180,14 +180,12 @@ impl SecretManager {
                 ))
             })
         } else if let Some(secret_name) = value.strip_prefix("secret:") {
-            self.get_secret(secret_name)
-                .await?
-                .ok_or_else(|| {
-                    odin_core::error::OdinError::Config(format!(
-                        "Secret '{}' referenced but not found",
-                        secret_name
-                    ))
-                })
+            self.get_secret(secret_name).await?.ok_or_else(|| {
+                odin_core::error::OdinError::Config(format!(
+                    "Secret '{}' referenced but not found",
+                    secret_name
+                ))
+            })
         } else {
             Ok(value.to_string())
         }
@@ -284,16 +282,16 @@ mod tests {
             .await
             .unwrap();
 
-        let masked = mgr
-            .mask_string("Bearer sk-secret-123 in request")
-            .await;
+        let masked = mgr.mask_string("Bearer sk-secret-123 in request").await;
         assert_eq!(masked, "Bearer **** in request");
     }
 
     #[tokio::test]
     async fn test_set_secret_from_env() {
         // Set a test env var
-        unsafe { std::env::set_var("TEST_SECRET_ENV", "env-value-456"); }
+        unsafe {
+            std::env::set_var("TEST_SECRET_ENV", "env-value-456");
+        }
         let mgr = SecretManager::default();
 
         mgr.set_secret_from_env("test_secret", "TEST_SECRET_ENV", None)
@@ -307,7 +305,9 @@ mod tests {
         assert!(info.from_env);
         assert_eq!(info.env_var, Some("TEST_SECRET_ENV".into()));
 
-        unsafe { std::env::remove_var("TEST_SECRET_ENV"); }
+        unsafe {
+            std::env::remove_var("TEST_SECRET_ENV");
+        }
     }
 
     #[tokio::test]

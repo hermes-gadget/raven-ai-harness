@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Top-level configuration for an Odin instance.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OdinConfig {
     /// General settings
     #[serde(default)]
@@ -43,22 +43,6 @@ pub struct OdinConfig {
     /// Scheduler configuration
     #[serde(default)]
     pub scheduler: SchedulerConfig,
-}
-
-impl Default for OdinConfig {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            models: ModelsConfig::default(),
-            agent: AgentConfig::default(),
-            tools: ToolsConfig::default(),
-            memory: MemoryConfig::default(),
-            safety: SafetyConfig::default(),
-            audit: AuditConfig::default(),
-            gateway: GatewayConfig::default(),
-            scheduler: SchedulerConfig::default(),
-        }
-    }
 }
 
 impl OdinConfig {

@@ -42,7 +42,9 @@ impl WebFetch {
     pub fn new() -> Self {
         Self {
             name: "web_fetch".into(),
-            description: "Fetch the contents of a URL via HTTP GET. Returns the raw text response body.".into(),
+            description:
+                "Fetch the contents of a URL via HTTP GET. Returns the raw text response body."
+                    .into(),
             client: Arc::new(http_client()),
         }
     }
@@ -101,12 +103,10 @@ impl Tool for WebFetch {
     ) -> OdinResult<ToolResult> {
         let start = Instant::now();
 
-        let parsed: WebFetchArgs = serde_json::from_value(args).map_err(|e| {
-            OdinError::Tool {
-                tool: self.name.clone(),
-                message: format!("Invalid arguments: {e}"),
-                source: Some(Box::new(e)),
-            }
+        let parsed: WebFetchArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
+            tool: self.name.clone(),
+            message: format!("Invalid arguments: {e}"),
+            source: Some(Box::new(e)),
         })?;
 
         let url = &parsed.url;
@@ -270,12 +270,10 @@ impl Tool for WebSearch {
     ) -> OdinResult<ToolResult> {
         let start = Instant::now();
 
-        let parsed: WebSearchArgs = serde_json::from_value(args).map_err(|e| {
-            OdinError::Tool {
-                tool: self.name.clone(),
-                message: format!("Invalid arguments: {e}"),
-                source: Some(Box::new(e)),
-            }
+        let parsed: WebSearchArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
+            tool: self.name.clone(),
+            message: format!("Invalid arguments: {e}"),
+            source: Some(Box::new(e)),
         })?;
 
         let query = &parsed.query;
@@ -285,9 +283,12 @@ impl Tool for WebSearch {
             let encoded = urlencoding(query);
             let url = template.replace("{query}", &encoded);
 
-            let response = self.client.get(&url).send().await.map_err(|e| {
-                OdinError::Network(format!("Search request failed: {e}"))
-            })?;
+            let response = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| OdinError::Network(format!("Search request failed: {e}")))?;
 
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
@@ -302,7 +303,11 @@ impl Tool for WebSearch {
                 } else {
                     body
                 },
-                error: if status.is_success() { None } else { Some(format!("HTTP {status}")) },
+                error: if status.is_success() {
+                    None
+                } else {
+                    Some(format!("HTTP {status}"))
+                },
                 duration_ms,
                 timestamp: Utc::now(),
             });

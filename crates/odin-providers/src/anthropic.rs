@@ -30,7 +30,11 @@ impl AnthropicProvider {
             .collect::<Vec<_>>()
             .join("\n");
 
-        let system_msg = if system.is_empty() { None } else { Some(system) };
+        let system_msg = if system.is_empty() {
+            None
+        } else {
+            Some(system)
+        };
 
         let anthropic_msgs: Vec<Value> = messages
             .iter()
@@ -101,9 +105,10 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|e| OdinError::provider("anthropic", format!("Request failed: {}", e)))?;
 
-        let json: Value = resp.json().await.map_err(|e| {
-            OdinError::provider("anthropic", format!("Invalid response: {}", e))
-        })?;
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| OdinError::provider("anthropic", format!("Invalid response: {}", e)))?;
 
         let content = json["content"][0]["text"]
             .as_str()
@@ -125,7 +130,10 @@ impl Provider for AnthropicProvider {
         _tools: &[ToolSchema],
         _options: &CompletionOptions,
     ) -> OdinResult<Box<dyn ChatStream>> {
-        Err(OdinError::provider("anthropic", "Streaming not yet implemented"))
+        Err(OdinError::provider(
+            "anthropic",
+            "Streaming not yet implemented",
+        ))
     }
 
     async fn health_check(&self) -> OdinResult<bool> {

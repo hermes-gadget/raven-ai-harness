@@ -33,8 +33,7 @@ impl StateSummarizer {
             .history
             .iter()
             .filter(|r| {
-                r.phase == LoopPhase::Verify
-                    && r.confidence.map(|c| c.is_high()).unwrap_or(false)
+                r.phase == LoopPhase::Verify && r.confidence.map(|c| c.is_high()).unwrap_or(false)
             })
             .filter_map(|r| r.output.clone())
             .collect();
@@ -55,10 +54,14 @@ impl StateSummarizer {
             }
         });
 
-        let last_result = state
-            .tool_results
-            .last()
-            .map(|tr| format!("[{}] {} — {}", tr.tool_name, if tr.success { "OK" } else { "FAIL" }, tr.output));
+        let last_result = state.tool_results.last().map(|tr| {
+            format!(
+                "[{}] {} — {}",
+                tr.tool_name,
+                if tr.success { "OK" } else { "FAIL" },
+                tr.output
+            )
+        });
 
         let errors: Vec<String> = state
             .history
@@ -150,10 +153,7 @@ impl StateSummarizer {
 
     /// Estimate token count for messages (rough: ~4 chars per token).
     fn estimate_tokens(&self, messages: &[Message]) -> TokenUsage {
-        let total_chars: usize = messages
-            .iter()
-            .map(|m| m.text().unwrap_or("").len())
-            .sum();
+        let total_chars: usize = messages.iter().map(|m| m.text().unwrap_or("").len()).sum();
         let estimated = (total_chars / 4) as u32;
         TokenUsage {
             prompt_tokens: estimated,
@@ -169,16 +169,10 @@ impl StateSummarizer {
     }
 
     /// Compress messages by keeping system + last N turns, summarizing the rest.
-    pub fn compress(
-        &self,
-        messages: &[Message],
-        _keep_last: usize,
-    ) -> Vec<Message> {
+    pub fn compress(&self, messages: &[Message], _keep_last: usize) -> Vec<Message> {
         // Keep system messages + last few turns + state summary
-        let system_msgs: Vec<&Message> = messages
-            .iter()
-            .filter(|m| m.role == Role::System)
-            .collect();
+        let system_msgs: Vec<&Message> =
+            messages.iter().filter(|m| m.role == Role::System).collect();
 
         let keep_count = 6; // Keep last 3 turns (user + assistant pairs)
         let recent_start = messages.len().saturating_sub(keep_count);

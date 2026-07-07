@@ -1,5 +1,9 @@
 # Raven vs Baseline — Comparative Analysis
 
+> **⚠️ Estimated — mock provider data.** The numbers below are produced by a
+> deterministic mock provider and represent expected behaviour patterns,
+> not real LLM benchmarks. See the "How to Read the Numbers" section below.
+
 ## Executive Summary
 
 Raven's looped agent engine was compared against a naive single-pass baseline agent using 8 simulated tasks of varying complexity (easy → complex), with both a simulated small model (3B-class, error-prone) and a large model (70B-class).

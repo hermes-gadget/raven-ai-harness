@@ -5,12 +5,8 @@
 
 use crate::models::MemoryRow;
 use async_trait::async_trait;
-use odin_core::{
-    error::OdinResult,
-    traits::MemoryStore,
-    MemoryCategory, MemoryEntry, OdinError,
-};
-use rusqlite::{params, Connection};
+use odin_core::{MemoryCategory, MemoryEntry, OdinError, error::OdinResult, traits::MemoryStore};
+use rusqlite::{Connection, params};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::instrument;
@@ -55,7 +51,10 @@ impl SqliteMemoryStore {
     fn init_tables(&self) -> OdinResult<()> {
         // Since `init_tables` is called from the constructor before the
         // Mutex can be contended, a blocking access is safe here.
-        let conn = self.conn.try_lock().expect("store just created, no contention");
+        let conn = self
+            .conn
+            .try_lock()
+            .expect("store just created, no contention");
 
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS memory_entries (
@@ -176,7 +175,8 @@ impl MemoryStore for SqliteMemoryStore {
 
         let mut results = Vec::new();
         for row in rows {
-            let row = row.map_err(|e| OdinError::Database(format!("Error reading search row: {e}")))?;
+            let row =
+                row.map_err(|e| OdinError::Database(format!("Error reading search row: {e}")))?;
             match MemoryEntry::try_from(row) {
                 Ok(entry) => results.push(entry),
                 Err(e) => tracing::warn!("Skipping malformed memory entry during search: {e}"),
@@ -223,9 +223,7 @@ impl MemoryStore for SqliteMemoryStore {
                     importance: row.get(6)?,
                 })
             })
-            .map_err(|e| {
-                OdinError::Database(format!("Failed to execute category query: {e}"))
-            })?;
+            .map_err(|e| OdinError::Database(format!("Failed to execute category query: {e}")))?;
 
         let mut results = Vec::new();
         for row in rows {

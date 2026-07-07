@@ -7,4 +7,4 @@ pub mod discord;
 pub mod http;
 pub mod ws;
 
-pub use http::{run_http_server, ChatRequest, ChatResponse, GatewayState, TaskHandlerFn};
+pub use http::{ChatRequest, ChatResponse, GatewayState, TaskHandlerFn, run_http_server};

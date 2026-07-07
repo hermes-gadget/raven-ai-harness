@@ -126,12 +126,10 @@ impl Tool for Git {
     ) -> OdinResult<ToolResult> {
         let start = Instant::now();
 
-        let parsed: GitArgs = serde_json::from_value(args).map_err(|e| {
-            OdinError::Tool {
-                tool: self.name.clone(),
-                message: format!("Invalid arguments: {e}"),
-                source: Some(Box::new(e)),
-            }
+        let parsed: GitArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
+            tool: self.name.clone(),
+            message: format!("Invalid arguments: {e}"),
+            source: Some(Box::new(e)),
         })?;
 
         let command_str = &parsed.command;
@@ -154,19 +152,19 @@ impl Tool for Git {
         let timeout = std::time::Duration::from_secs(parsed.timeout_secs.max(1));
 
         // Spawn and wait with timeout
-        let output = tokio::time::timeout(timeout, cmd.output()).await.map_err(|_| {
-            OdinError::Timeout(format!(
-                "Git command timed out after {}s: git {}",
-                parsed.timeout_secs, command_str
-            ))
-        })?;
+        let output = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| {
+                OdinError::Timeout(format!(
+                    "Git command timed out after {}s: git {}",
+                    parsed.timeout_secs, command_str
+                ))
+            })?;
 
-        let output = output.map_err(|e| {
-            OdinError::Tool {
-                tool: self.name.clone(),
-                message: format!("Failed to execute git command: {e}"),
-                source: Some(Box::new(e)),
-            }
+        let output = output.map_err(|e| OdinError::Tool {
+            tool: self.name.clone(),
+            message: format!("Failed to execute git command: {e}"),
+            source: Some(Box::new(e)),
         })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -190,7 +188,10 @@ impl Tool for Git {
         } else {
             let exit_code = output.status.code().unwrap_or(-1);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            Some(format!("Git {} failed (exit {exit_code}): {stderr}", subcommand))
+            Some(format!(
+                "Git {} failed (exit {exit_code}): {stderr}",
+                subcommand
+            ))
         };
 
         Ok(ToolResult {
@@ -280,7 +281,11 @@ mod tests {
         });
         let result = git.execute(args, &test_context()).await.unwrap();
         assert!(result.success, "STDERR: {:?}", result.error);
-        assert!(result.output.contains("git version"), "output: {}", result.output);
+        assert!(
+            result.output.contains("git version"),
+            "output: {}",
+            result.output
+        );
     }
 
     #[tokio::test]
@@ -328,9 +333,18 @@ mod tests {
     #[test]
     fn test_shlex_split() {
         assert_eq!(shlex_split("status"), vec!["status"]);
-        assert_eq!(shlex_split("log --oneline -5"), vec!["log", "--oneline", "-5"]);
-        assert_eq!(shlex_split("commit -m 'my message'"), vec!["commit", "-m", "my message"]);
-        assert_eq!(shlex_split("add \"file name with spaces.txt\""), vec!["add", "file name with spaces.txt"]);
+        assert_eq!(
+            shlex_split("log --oneline -5"),
+            vec!["log", "--oneline", "-5"]
+        );
+        assert_eq!(
+            shlex_split("commit -m 'my message'"),
+            vec!["commit", "-m", "my message"]
+        );
+        assert_eq!(
+            shlex_split("add \"file name with spaces.txt\""),
+            vec!["add", "file name with spaces.txt"]
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use odin_core::error::OdinResult;
-use odin_core::traits::{LoopState, PhaseResult, PhaseRecord, Provider};
+use odin_core::traits::{LoopState, PhaseRecord, PhaseResult, Provider, ToolContext};
 use odin_core::types::*;
 use std::sync::Arc;
 
@@ -35,6 +35,10 @@ pub struct PhaseContext {
     pub plan: Option<DecomposedPlan>,
     /// Optional LLM provider for real model calls
     pub provider: Option<Arc<dyn Provider>>,
+    /// Optional stronger provider for escalation
+    pub escalation_provider: Option<Arc<dyn Provider>>,
+    /// Optional tool registry for dispatching real tool calls
+    pub tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
 }
 
 // ── Plan Phase ──────────────────────────────────────────────────────
@@ -121,7 +125,11 @@ impl Phase for ActPhase {
             let pending_desc = context
                 .plan
                 .as_ref()
-                .and_then(|p| p.sub_tasks.iter().find(|st| st.status == SubTaskStatus::Pending))
+                .and_then(|p| {
+                    p.sub_tasks
+                        .iter()
+                        .find(|st| st.status == SubTaskStatus::Pending)
+                })
                 .map(|st| st.description.as_str())
                 .unwrap_or("the current goal");
 
@@ -148,18 +156,96 @@ impl Phase for ActPhase {
                         let desc = format!("Calling tool: {}", calls[0].function.name);
                         state.messages.push(response.message);
 
-                        // Simulated tool execution (real impl would dispatch to tool registry)
-                        let tool_results: Vec<ToolResult> = calls.iter().map(|tc| {
-                            ToolResult {
-                                call_id: tc.id.clone(),
-                                tool_name: tc.function.name.clone(),
-                                success: true,
-                                output: format!("[Executed {} with args: {}]", tc.function.name, tc.function.arguments),
-                                error: None,
-                                duration_ms: 0,
-                                timestamp: chrono::Utc::now(),
+                        // Actually dispatch tool calls via the tool registry
+                        let tool_results: Vec<ToolResult> = if let Some(ref registry) =
+                            context.tool_registry
+                        {
+                            let mut results = Vec::new();
+                            for tc in calls {
+                                let tool_name = tc.function.name.clone();
+                                let tool = match registry.get(&tool_name) {
+                                    Some(t) => t,
+                                    None => {
+                                        let tr = ToolResult {
+                                            call_id: tc.id.clone(),
+                                            tool_name: tool_name.clone(),
+                                            success: false,
+                                            output: String::new(),
+                                            error: Some(format!(
+                                                "Tool '{}' not found in registry",
+                                                tool_name
+                                            )),
+                                            duration_ms: 0,
+                                            timestamp: chrono::Utc::now(),
+                                        };
+                                        results.push(tr);
+                                        continue;
+                                    }
+                                };
+
+                                let args: serde_json::Value =
+                                    match serde_json::from_str(&tc.function.arguments) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            let tr = ToolResult {
+                                                call_id: tc.id.clone(),
+                                                tool_name: tool_name.clone(),
+                                                success: false,
+                                                output: String::new(),
+                                                error: Some(format!("Invalid tool args: {}", e)),
+                                                duration_ms: 0,
+                                                timestamp: chrono::Utc::now(),
+                                            };
+                                            results.push(tr);
+                                            continue;
+                                        }
+                                    };
+
+                                let tool_context = ToolContext {
+                                    agent_id: uuid::Uuid::default(),
+                                    session_id: uuid::Uuid::default(),
+                                    working_dir: std::env::current_dir().unwrap_or_default(),
+                                    env: std::collections::HashMap::new(),
+                                };
+
+                                let start = std::time::Instant::now();
+                                match tool.execute(args, &tool_context).await {
+                                    Ok(tr) => {
+                                        results.push(tr);
+                                    }
+                                    Err(e) => {
+                                        let tr = ToolResult {
+                                            call_id: tc.id.clone(),
+                                            tool_name: tool_name.clone(),
+                                            success: false,
+                                            output: String::new(),
+                                            error: Some(e.to_string()),
+                                            duration_ms: start.elapsed().as_millis() as u64,
+                                            timestamp: chrono::Utc::now(),
+                                        };
+                                        results.push(tr);
+                                    }
+                                }
                             }
-                        }).collect();
+                            results
+                        } else {
+                            // No tool registry — simulate results
+                            calls
+                                .iter()
+                                .map(|tc| ToolResult {
+                                    call_id: tc.id.clone(),
+                                    tool_name: tc.function.name.clone(),
+                                    success: true,
+                                    output: format!(
+                                        "[Simulated] Executed {} with args: {}",
+                                        tc.function.name, tc.function.arguments
+                                    ),
+                                    error: None,
+                                    duration_ms: 0,
+                                    timestamp: chrono::Utc::now(),
+                                })
+                                .collect()
+                        };
 
                         for tr in &tool_results {
                             state.tool_results.push(tr.clone());
@@ -183,14 +269,11 @@ impl Phase for ActPhase {
             }
         } else {
             // Stub mode — no provider attached
-            let pending = context
-                .plan
-                .as_ref()
-                .and_then(|p| {
-                    p.sub_tasks
-                        .iter()
-                        .find(|st| st.status == SubTaskStatus::Pending)
-                });
+            let pending = context.plan.as_ref().and_then(|p| {
+                p.sub_tasks
+                    .iter()
+                    .find(|st| st.status == SubTaskStatus::Pending)
+            });
 
             let desc = match pending {
                 Some(task) => format!("Working on: {}", task.description),
@@ -261,7 +344,11 @@ impl Phase for InspectPhase {
         let last_tool = state.tool_results.last();
         let inspection = match last_tool {
             Some(tr) if !tr.success => {
-                format!("Tool '{}' failed: {}", tr.tool_name, tr.error.as_deref().unwrap_or("unknown error"))
+                format!(
+                    "Tool '{}' failed: {}",
+                    tr.tool_name,
+                    tr.error.as_deref().unwrap_or("unknown error")
+                )
             }
             Some(tr) => {
                 format!("Tool '{}' succeeded in {}ms", tr.tool_name, tr.duration_ms)
@@ -328,7 +415,8 @@ impl Phase for CritiquePhase {
             if text.len() > 200 {
                 ConfidenceScore::new(0.9) // Substantial response = high confidence
             } else {
-                self.scorer.score_text_response(text, Some(&state.task.goal))
+                self.scorer
+                    .score_text_response(text, Some(&state.task.goal))
             }
         } else {
             ConfidenceScore::new(0.5)
@@ -386,7 +474,10 @@ impl Phase for RevisePhase {
         state: &mut LoopState,
         _context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
-        tracing::info!("[REVISE] Revising approach (retry count: {})", state.retry_count);
+        tracing::info!(
+            "[REVISE] Revising approach (retry count: {})",
+            state.retry_count
+        );
 
         state.current_phase = LoopPhase::Revise;
         state.retry_count += 1;
@@ -454,14 +545,11 @@ impl Phase for VerifyPhase {
         state.current_phase = LoopPhase::Verify;
 
         // Check if the current sub-task succeeded
-        let current_task = context
-            .plan
-            .as_ref()
-            .and_then(|p| {
-                p.sub_tasks
-                    .iter()
-                    .find(|st| st.status == SubTaskStatus::Pending)
-            });
+        let current_task = context.plan.as_ref().and_then(|p| {
+            p.sub_tasks
+                .iter()
+                .find(|st| st.status == SubTaskStatus::Pending)
+        });
 
         let verification = match current_task {
             Some(task) => {
@@ -533,13 +621,17 @@ impl Phase for DecidePhase {
         }
 
         // Check if all sub-tasks are complete
-        let all_done = context.plan.as_ref().map(|p| {
-            p.sub_tasks.iter().all(|st| {
-                st.status == SubTaskStatus::Completed
-                    || st.status == SubTaskStatus::Skipped
-                    || st.status == SubTaskStatus::Failed
+        let all_done = context
+            .plan
+            .as_ref()
+            .map(|p| {
+                p.sub_tasks.iter().all(|st| {
+                    st.status == SubTaskStatus::Completed
+                        || st.status == SubTaskStatus::Skipped
+                        || st.status == SubTaskStatus::Failed
+                })
             })
-        }).unwrap_or(false);
+            .unwrap_or(false);
 
         if all_done {
             return Ok(PhaseResult {
@@ -567,7 +659,10 @@ impl Phase for DecidePhase {
 
         let record = PhaseRecord {
             phase: LoopPhase::Decide,
-            input: Some(format!("Iteration {} / {}", state.iteration, state.task.max_iterations)),
+            input: Some(format!(
+                "Iteration {} / {}",
+                state.iteration, state.task.max_iterations
+            )),
             output: Some(format!("Decision: {:?}", decision)),
             confidence: last_confidence,
             duration_ms: 0,

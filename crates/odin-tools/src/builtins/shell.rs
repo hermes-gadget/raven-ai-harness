@@ -84,7 +84,9 @@ impl Shell {
 
     /// Check whether a command matches any dangerous pattern.
     pub fn is_dangerous(&self, command: &str) -> bool {
-        self.dangerous_patterns.iter().any(|re| re.is_match(command))
+        self.dangerous_patterns
+            .iter()
+            .any(|re| re.is_match(command))
     }
 
     /// Construct the JSON schema for this tool.
@@ -139,11 +141,11 @@ impl Tool for Shell {
     }
 
     fn requires_approval(&self) -> bool {
-        true  // shell commands always require approval for safety
+        true // shell commands always require approval for safety
     }
 
     fn is_safe(&self) -> bool {
-        false  // shell is not inherently safe
+        false // shell is not inherently safe
     }
 
     #[instrument(skip(self, _context), fields(tool = self.name))]
@@ -154,12 +156,10 @@ impl Tool for Shell {
     ) -> OdinResult<ToolResult> {
         let start = Instant::now();
 
-        let parsed: ShellArgs = serde_json::from_value(args).map_err(|e| {
-            OdinError::Tool {
-                tool: self.name.clone(),
-                message: format!("Invalid arguments: {e}"),
-                source: Some(Box::new(e)),
-            }
+        let parsed: ShellArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
+            tool: self.name.clone(),
+            message: format!("Invalid arguments: {e}"),
+            source: Some(Box::new(e)),
         })?;
 
         let command_str = &parsed.command;
@@ -194,19 +194,19 @@ impl Tool for Shell {
         let timeout = std::time::Duration::from_secs(parsed.timeout_secs.max(1));
 
         // Spawn and wait with timeout
-        let output = tokio::time::timeout(timeout, cmd.output()).await.map_err(|_| {
-            OdinError::Timeout(format!(
-                "Shell command timed out after {}s: {command_str}",
-                parsed.timeout_secs
-            ))
-        })?;
+        let output = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| {
+                OdinError::Timeout(format!(
+                    "Shell command timed out after {}s: {command_str}",
+                    parsed.timeout_secs
+                ))
+            })?;
 
-        let output = output.map_err(|e| {
-            OdinError::Tool {
-                tool: self.name.clone(),
-                message: format!("Failed to execute command: {e}"),
-                source: Some(Box::new(e)),
-            }
+        let output = output.map_err(|e| OdinError::Tool {
+            tool: self.name.clone(),
+            message: format!("Failed to execute command: {e}"),
+            source: Some(Box::new(e)),
         })?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -267,7 +267,11 @@ mod tests {
         });
         let result = shell.execute(args, &test_context()).await.unwrap();
         assert!(result.success, "STDERR: {:?}", result.error);
-        assert!(result.output.contains("hello odin"), "output: {}", result.output);
+        assert!(
+            result.output.contains("hello odin"),
+            "output: {}",
+            result.output
+        );
     }
 
     #[tokio::test]

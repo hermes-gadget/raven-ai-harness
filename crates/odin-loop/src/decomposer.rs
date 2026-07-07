@@ -97,7 +97,10 @@ impl GoalDecomposer {
             tasks.push(format!("Verify the fix resolves: {}", goal));
         }
         // Pattern 3: "Analyze/Research/Investigate X"
-        else if lower.contains("analyze") || lower.contains("research") || lower.contains("investigate") {
+        else if lower.contains("analyze")
+            || lower.contains("research")
+            || lower.contains("investigate")
+        {
             tasks.push(format!("Gather information about: {}", goal));
             tasks.push(format!("Analyze findings for: {}", goal));
             tasks.push(format!("Summarize and report on: {}", goal));
@@ -164,19 +167,35 @@ mod tests {
         assert!(!plan.sub_tasks.is_empty());
         assert!(plan.sub_tasks.len() >= 2);
         // Should include planning, implementation, testing
-        let descs: Vec<&str> = plan.sub_tasks.iter().map(|s| s.description.as_str()).collect();
+        let descs: Vec<&str> = plan
+            .sub_tasks
+            .iter()
+            .map(|s| s.description.as_str())
+            .collect();
         let combined = descs.join(" ");
         assert!(combined.contains("Plan") || combined.contains("plan"));
-        assert!(combined.contains("Implement") || combined.contains("implement") || combined.contains("core"));
+        assert!(
+            combined.contains("Implement")
+                || combined.contains("implement")
+                || combined.contains("core")
+        );
     }
 
     #[test]
     fn test_decompose_fix_goal() {
         let decomposer = GoalDecomposer::default();
         let plan = decomposer.decompose_heuristic("Fix the database connection leak");
-        let descs: Vec<&str> = plan.sub_tasks.iter().map(|s| s.description.as_str()).collect();
+        let descs: Vec<&str> = plan
+            .sub_tasks
+            .iter()
+            .map(|s| s.description.as_str())
+            .collect();
         let combined = descs.join(" ");
-        assert!(combined.contains("Reproduce") || combined.contains("Identify") || combined.contains("root cause"));
+        assert!(
+            combined.contains("Reproduce")
+                || combined.contains("Identify")
+                || combined.contains("root cause")
+        );
     }
 
     #[test]

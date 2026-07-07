@@ -41,7 +41,10 @@ impl ProviderRegistry {
 
     /// List all registered provider names.
     pub fn list_names(&self) -> Vec<String> {
-        self.providers.iter().map(|p| p.name().to_string()).collect()
+        self.providers
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect()
     }
 
     /// Get the default provider (first registered, or one named "default").
@@ -135,11 +138,8 @@ mod tests {
     #[test]
     fn test_registry_register_and_get() {
         let registry = ProviderRegistry::new();
-        let provider = OpenAiCompatProvider::new(
-            "test-provider",
-            "http://localhost:11434/v1",
-            None,
-        );
+        let provider =
+            OpenAiCompatProvider::new("test-provider", "http://localhost:11434/v1", None);
         registry.register(provider);
 
         let retrieved = registry.get("test-provider");
@@ -150,8 +150,16 @@ mod tests {
     #[test]
     fn test_registry_list_names() {
         let registry = ProviderRegistry::new();
-        registry.register(OpenAiCompatProvider::new("p1", "http://localhost:8080", None));
-        registry.register(OpenAiCompatProvider::new("p2", "http://localhost:8081", None));
+        registry.register(OpenAiCompatProvider::new(
+            "p1",
+            "http://localhost:8080",
+            None,
+        ));
+        registry.register(OpenAiCompatProvider::new(
+            "p2",
+            "http://localhost:8081",
+            None,
+        ));
 
         let names = registry.list_names();
         assert!(names.contains(&"p1".to_string()));
@@ -162,7 +170,11 @@ mod tests {
     #[test]
     fn test_registry_remove() {
         let registry = ProviderRegistry::new();
-        registry.register(OpenAiCompatProvider::new("temp", "http://localhost:8080", None));
+        registry.register(OpenAiCompatProvider::new(
+            "temp",
+            "http://localhost:8080",
+            None,
+        ));
         assert!(registry.get("temp").is_some());
 
         registry.remove("temp");

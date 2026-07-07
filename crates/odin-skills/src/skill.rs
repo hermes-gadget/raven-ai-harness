@@ -231,18 +231,11 @@ impl SkillRegistry {
             if path.extension().and_then(|s| s.to_str()) == Some("md") {
                 match Skill::from_file(&path) {
                     Ok(skill) => {
-                        tracing::info!(
-                            "Loaded skill '{}' from {}",
-                            skill.name,
-                            path.display()
-                        );
+                        tracing::info!("Loaded skill '{}' from {}", skill.name, path.display());
                         registry.skills.insert(skill.name.clone(), skill);
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Skipped {}: {e}",
-                            path.display()
-                        );
+                        tracing::warn!("Skipped {}: {e}", path.display());
                     }
                 }
             }
@@ -269,10 +262,7 @@ impl SkillRegistry {
 
     /// Get all enabled skills.
     pub fn enabled(&self) -> Vec<&Skill> {
-        self.skills
-            .values()
-            .filter(|s| s.enabled)
-            .collect()
+        self.skills.values().filter(|s| s.enabled).collect()
     }
 
     /// Check if a skill exists by name.

@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,8 +48,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo bench --no-run 2>&1 | head -5
-      - run: cargo test --benches
+      - run: cargo check --workspace --benches 2>&1 | head -5
+      - run: cargo test --workspace --all-targets
 
   security:
     name: Security Audit

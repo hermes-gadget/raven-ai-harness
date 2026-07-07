@@ -7,10 +7,10 @@
 //! The chat endpoint is extensible via a closure handler.
 
 use axum::{
+    Json, Router,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use odin_core::error::OdinResult;
 use serde::{Deserialize, Serialize};
@@ -21,10 +21,11 @@ use tokio::net::TcpListener;
 use tracing;
 
 /// A boxed async handler for processing chat/task requests.
-pub type TaskHandlerFn =
-    Arc<dyn Fn(ChatRequest) -> Pin<Box<dyn Future<Output = OdinResult<ChatResponse>> + Send>>
+pub type TaskHandlerFn = Arc<
+    dyn Fn(ChatRequest) -> Pin<Box<dyn Future<Output = OdinResult<ChatResponse>> + Send>>
         + Send
-        + Sync>;
+        + Sync,
+>;
 
 /// Shared state for the HTTP server.
 #[derive(Clone)]
@@ -149,20 +150,15 @@ async fn chat_handler(
 ///
 /// The `task_handler` is optional — if provided, it will be called
 /// for every `/chat` request. Without one, the endpoint returns 503.
-pub async fn run_http_server(
-    addr: &str,
-    task_handler: Option<TaskHandlerFn>,
-) -> OdinResult<()> {
+pub async fn run_http_server(addr: &str, task_handler: Option<TaskHandlerFn>) -> OdinResult<()> {
     let state: Arc<GatewayState> = Arc::new(GatewayState { task_handler });
     let start_time = Arc::new(std::time::Instant::now());
 
     let app = build_router(state, start_time);
 
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|e| {
-            odin_core::error::OdinError::Network(format!("Failed to bind to {addr}: {e}"))
-        })?;
+    let listener = TcpListener::bind(addr).await.map_err(|e| {
+        odin_core::error::OdinError::Network(format!("Failed to bind to {addr}: {e}"))
+    })?;
 
     tracing::info!("[GATEWAY] HTTP server listening on {addr}");
 
@@ -174,10 +170,7 @@ pub async fn run_http_server(
 }
 
 /// Build the Axum router, useful for embedding in larger apps.
-pub fn build_router(
-    state: Arc<GatewayState>,
-    start_time: Arc<std::time::Instant>,
-) -> Router {
+pub fn build_router(state: Arc<GatewayState>, start_time: Arc<std::time::Instant>) -> Router {
     Router::new()
         .route(
             "/health",

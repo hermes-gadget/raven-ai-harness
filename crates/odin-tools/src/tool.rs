@@ -94,10 +94,7 @@ impl ToolRegistry {
 
     /// Number of registered tools.
     pub fn len(&self) -> usize {
-        self.tools
-            .read()
-            .map(|t| t.len())
-            .unwrap_or(0)
+        self.tools.read().map(|t| t.len()).unwrap_or(0)
     }
 
     /// Returns `true` if no tools are registered.
@@ -116,10 +113,10 @@ impl Default for ToolRegistry {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use chrono::Utc;
     use odin_core::error::OdinResult;
     use odin_core::traits::{Tool, ToolContext};
-    use odin_core::types::{ToolResult, ToolSchema, FunctionSchema};
-    use chrono::Utc;
+    use odin_core::types::{FunctionSchema, ToolResult, ToolSchema};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     /// Minimal test tool.
@@ -173,7 +170,8 @@ mod tests {
             _context: &ToolContext,
         ) -> OdinResult<ToolResult> {
             self.called.store(true, Ordering::SeqCst);
-            let msg = args.get("message")
+            let msg = args
+                .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -208,7 +206,9 @@ mod tests {
     async fn test_register_duplicate() {
         let registry = ToolRegistry::new();
         registry.register(Box::new(EchoTool::new("echo"))).unwrap();
-        let err = registry.register(Box::new(EchoTool::new("echo"))).unwrap_err();
+        let err = registry
+            .register(Box::new(EchoTool::new("echo")))
+            .unwrap_err();
         assert!(err.to_string().contains("already registered"));
     }
 

@@ -85,20 +85,18 @@ impl Tool for FileRead {
     ) -> OdinResult<ToolResult> {
         let start = Instant::now();
 
-        let parsed: FileReadArgs = serde_json::from_value(args).map_err(|e| {
-            OdinError::Tool {
-                tool: self.name.clone(),
-                message: format!("Invalid arguments: {e}"),
-                source: Some(Box::new(e)),
-            }
+        let parsed: FileReadArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
+            tool: self.name.clone(),
+            message: format!("Invalid arguments: {e}"),
+            source: Some(Box::new(e)),
         })?;
 
         let path = Path::new(&parsed.path);
         let canonical = self.sandbox.check_read(path)?;
 
-        let content = tokio::fs::read_to_string(&canonical).await.map_err(|e| {
-            OdinError::Io(e)
-        })?;
+        let content = tokio::fs::read_to_string(&canonical)
+            .await
+            .map_err(|e| OdinError::Io(e))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -189,12 +187,10 @@ impl Tool for FileWrite {
     ) -> OdinResult<ToolResult> {
         let start = Instant::now();
 
-        let parsed: FileWriteArgs = serde_json::from_value(args).map_err(|e| {
-            OdinError::Tool {
-                tool: self.name.clone(),
-                message: format!("Invalid arguments: {e}"),
-                source: Some(Box::new(e)),
-            }
+        let parsed: FileWriteArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
+            tool: self.name.clone(),
+            message: format!("Invalid arguments: {e}"),
+            source: Some(Box::new(e)),
         })?;
 
         let path = Path::new(&parsed.path);
@@ -202,14 +198,14 @@ impl Tool for FileWrite {
 
         // Create parent directories if needed
         if let Some(parent) = canonical.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                OdinError::Io(e)
-            })?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| OdinError::Io(e))?;
         }
 
-        tokio::fs::write(&canonical, &parsed.content).await.map_err(|e| {
-            OdinError::Io(e)
-        })?;
+        tokio::fs::write(&canonical, &parsed.content)
+            .await
+            .map_err(|e| OdinError::Io(e))?;
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
@@ -217,7 +213,11 @@ impl Tool for FileWrite {
             call_id: String::new(),
             tool_name: self.name.clone(),
             success: true,
-            output: format!("Successfully wrote {} bytes to {}", parsed.content.len(), canonical.display()),
+            output: format!(
+                "Successfully wrote {} bytes to {}",
+                parsed.content.len(),
+                canonical.display()
+            ),
             error: None,
             duration_ms,
             timestamp: Utc::now(),

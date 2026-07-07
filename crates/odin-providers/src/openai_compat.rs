@@ -1,6 +1,7 @@
 //! OpenAI-compatible provider (works with OpenAI, Ollama, vLLM, Groq, DeepSeek, etc.)
 
 use async_trait::async_trait;
+use futures::Stream;
 use odin_core::error::{OdinError, OdinResult};
 use odin_core::traits::{ChatStream, Provider};
 use odin_core::types::*;
@@ -8,7 +9,6 @@ use reqwest::Client;
 use serde_json::Value;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
-use futures::Stream;
 
 /// Provider for any OpenAI-compatible API endpoint.
 pub struct OpenAiCompatProvider {
@@ -51,7 +51,10 @@ impl OpenAiCompatProvider {
             .iter()
             .map(|m| {
                 let mut map = serde_json::Map::new();
-                map.insert("role".into(), serde_json::to_value(m.role.to_string()).unwrap());
+                map.insert(
+                    "role".into(),
+                    serde_json::to_value(m.role.to_string()).unwrap(),
+                );
 
                 match &m.content {
                     MessageContent::Text { content } => {
@@ -106,10 +109,12 @@ impl OpenAiCompatProvider {
         if !tools.is_empty() {
             let tools_json: Vec<Value> = tools
                 .iter()
-                .map(|t| serde_json::json!({
-                    "type": "function",
-                    "function": t.function,
-                }))
+                .map(|t| {
+                    serde_json::json!({
+                        "type": "function",
+                        "function": t.function,
+                    })
+                })
                 .collect();
             body["tools"] = Value::Array(tools_json);
         }
@@ -180,9 +185,10 @@ impl Provider for OpenAiCompatProvider {
             req = req.header("Authorization", format!("Bearer {}", key));
         }
 
-        let resp = req.send().await.map_err(|e| {
-            OdinError::provider(&self.name, format!("Chat request failed: {}", e))
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| OdinError::provider(&self.name, format!("Chat request failed: {}", e)))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -200,7 +206,17 @@ impl Provider for OpenAiCompatProvider {
         let choice = &json["choices"][0];
         let msg = &choice["message"];
 
-        let content = msg["content"].as_str().map(|s| s.to_string());
+        // Try content first, fall back to reasoning_content for DeepSeek-style models
+        let content = msg["content"]
+            .as_str()
+            .and_then(|s| {
+                if s.is_empty() || s == "null" {
+                    None
+                } else {
+                    Some(s.to_string())
+                }
+            })
+            .or_else(|| msg["reasoning_content"].as_str().map(|s| s.to_string()));
         let tool_calls: Vec<ToolCall> = msg["tool_calls"]
             .as_array()
             .map(|arr| {
@@ -210,7 +226,10 @@ impl Provider for OpenAiCompatProvider {
                         call_type: "function".to_string(),
                         function: FunctionCall {
                             name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
-                            arguments: tc["function"]["arguments"].as_str().unwrap_or("{}").to_string(),
+                            arguments: tc["function"]["arguments"]
+                                .as_str()
+                                .unwrap_or("{}")
+                                .to_string(),
                         },
                     })
                     .collect()
@@ -231,13 +250,13 @@ impl Provider for OpenAiCompatProvider {
             Message::assistant(content.unwrap_or_default())
         };
 
-        let usage = json["usage"].as_object().map_or(TokenUsage::default(), |u| {
-            TokenUsage {
+        let usage = json["usage"]
+            .as_object()
+            .map_or(TokenUsage::default(), |u| TokenUsage {
                 prompt_tokens: u["prompt_tokens"].as_u64().unwrap_or(0) as u32,
                 completion_tokens: u["completion_tokens"].as_u64().unwrap_or(0) as u32,
                 total_tokens: u["total_tokens"].as_u64().unwrap_or(0) as u32,
-            }
-        });
+            });
 
         Ok(ChatResponse {
             message,

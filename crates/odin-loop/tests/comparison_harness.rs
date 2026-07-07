@@ -13,9 +13,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 use odin_baseline::BaselineAgent;
 use odin_core::error::OdinResult;
+use odin_core::traits::LoopEngine as LoopEngineTrait;
 use odin_core::traits::{ChatStream, Provider};
 use odin_core::types::*;
-use odin_core::traits::LoopEngine as LoopEngineTrait;
 use odin_loop::engine::Engine as LoopEngine;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -135,7 +135,9 @@ impl MockProvider {
             m.role == Role::Tool && m.text().map(|t| t.contains("rm -rf")).unwrap_or(false)
         }) {
             return ChatResponse {
-                message: Message::assistant("That approach failed. Let me try the correct method instead."),
+                message: Message::assistant(
+                    "That approach failed. Let me try the correct method instead.",
+                ),
                 usage: TokenUsage {
                     prompt_tokens: 700,
                     completion_tokens: 50,
@@ -173,7 +175,8 @@ impl MockProvider {
                                 call_type: "function".into(),
                                 function: FunctionCall {
                                     name: "file_write".into(),
-                                    arguments: r#"{"path":"output.txt","content":"Hello World"}"#.into(),
+                                    arguments: r#"{"path":"output.txt","content":"Hello World"}"#
+                                        .into(),
                                 },
                             }],
                         },
@@ -464,9 +467,10 @@ impl ComparisonReport {
 
         for run in &self.runs {
             // Find the matching pair
-            let baseline = self.runs.iter().find(|r| {
-                r.agent_name == "baseline" && r.task.goal == run.task.goal
-            });
+            let baseline = self
+                .runs
+                .iter()
+                .find(|r| r.agent_name == "baseline" && r.task.goal == run.task.goal);
 
             if run.agent_name == "looped" {
                 if let Some(base) = baseline {
@@ -653,26 +657,29 @@ async fn run_comparison(model_type: &str, small_model: bool) -> ComparisonReport
 
     // Compute aggregate metrics
     let looped: Vec<&AgentRun> = runs.iter().filter(|r| r.agent_name == "looped").collect();
-    let baseline: Vec<&AgentRun> = runs
-        .iter()
-        .filter(|r| r.agent_name == "baseline")
-        .collect();
+    let baseline: Vec<&AgentRun> = runs.iter().filter(|r| r.agent_name == "baseline").collect();
 
     let looped_success = looped.iter().filter(|r| r.success).count() as f64 / looped.len() as f64;
     let baseline_success =
         baseline.iter().filter(|r| r.success).count() as f64 / baseline.len() as f64;
 
-    let looped_avg_iter = looped.iter().map(|r| r.iterations as f64).sum::<f64>() / looped.len() as f64;
+    let looped_avg_iter =
+        looped.iter().map(|r| r.iterations as f64).sum::<f64>() / looped.len() as f64;
     let baseline_avg_iter =
         baseline.iter().map(|r| r.iterations as f64).sum::<f64>() / baseline.len() as f64;
 
-    let looped_avg_tokens =
-        looped.iter().map(|r| r.estimated_tokens as f64).sum::<f64>() / looped.len() as f64;
-    let baseline_avg_tokens =
-        baseline.iter().map(|r| r.estimated_tokens as f64).sum::<f64>() / baseline.len() as f64;
+    let looped_avg_tokens = looped
+        .iter()
+        .map(|r| r.estimated_tokens as f64)
+        .sum::<f64>()
+        / looped.len() as f64;
+    let baseline_avg_tokens = baseline
+        .iter()
+        .map(|r| r.estimated_tokens as f64)
+        .sum::<f64>()
+        / baseline.len() as f64;
 
-    let looped_avg_conf =
-        looped.iter().map(|r| r.confidence).sum::<f64>() / looped.len() as f64;
+    let looped_avg_conf = looped.iter().map(|r| r.confidence).sum::<f64>() / looped.len() as f64;
     let baseline_avg_conf =
         baseline.iter().map(|r| r.confidence).sum::<f64>() / baseline.len() as f64;
 

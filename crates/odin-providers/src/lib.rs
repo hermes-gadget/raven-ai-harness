@@ -4,12 +4,14 @@
 //! Designed so adding a new provider requires implementing one trait.
 
 pub mod anthropic;
+pub mod factory;
 pub mod local;
 pub mod openai_compat;
 pub mod registry;
 pub mod traits;
 
 pub use anthropic::AnthropicProvider;
+pub use factory::create_provider;
 pub use local::LocalProvider;
 pub use openai_compat::OpenAiCompatProvider;
 pub use registry::ProviderRegistry;

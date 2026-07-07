@@ -1,51 +1,128 @@
-# Raven AI Harness — Example Configuration
-# Copy to ~/.odin/config.yaml and customize
+# =============================================================================
+# Raven AI Harness — Full Configuration Example
+# =============================================================================
+# This file documents every configuration option supported by the Odin config
+# system. Copy this to ~/.odin/config.yaml (or odin.yaml/odin.yml in the
+# working directory) and adjust values as needed.
 
 general:
+  # Human-readable name for this instance (default: "odin")
   instance_name: raven
+
+  # Directory for Odin data (defaults to ~/.odin)
+  # data_dir: /var/lib/odin
+
+  # Log level: trace, debug, info, warn, error (default: "info")
   log_level: info
+
+  # Enable debug mode (default: false)
   debug: false
 
+# =============================================================================
+# Model Provider Configuration
+# =============================================================================
 models:
-  # The default provider for most operations
+  # Default provider name to use (default: "openai_compat")
   default_provider: openai_compat
+
+  # Default model for the primary provider
   default_model: gpt-4o-mini
 
-  # Optional: specific models for different phases
-  # planning_model: gpt-4o-mini  # Cheaper model for planning
-  # critique_model: gpt-4o-mini  # Model for self-evaluation
-  # escalation_model: gpt-4o    # Stronger model for hard problems
+  # Model used for the planning phase (can be a cheaper/smaller model)
+  planning_model: gpt-4o-mini
 
+  # Model used for critique/self-check (can be the same or different)
+  critique_model: gpt-4o-mini
+
+  # Stronger model for escalation when confidence is low
+  escalation_model: gpt-4o
+
+  # Provider-specific configurations
   providers:
-    # OpenAI-compatible API (works with OpenAI, Ollama, vLLM, Groq, DeepSeek, etc.)
+    # OpenAI-compatible provider (works with OpenAI, Ollama, vLLM, Groq, DeepSeek, etc.)
     openai_compat:
       provider_type: openai_compat
       base_url: https://api.openai.com/v1
       api_key_env: OPENAI_API_KEY
+      default_model: gpt-4o-mini
+      # Extra HTTP headers (optional)
+      headers: {}
+      # Request timeout in seconds (default: 120)
+      timeout_secs: 120
+      # Max retries for transient failures (default: 3)
+      max_retries: 3
+
+    # Anthropic provider
+    anthropic:
+      provider_type: anthropic
+      api_key_env: ANTHROPIC_API_KEY
+      default_model: claude-sonnet-4-20250514
+      headers: {}
       timeout_secs: 120
       max_retries: 3
 
-    # Anthropic Claude
-    # anthropic:
-    #   provider_type: anthropic
-    #   api_key_env: ANTHROPIC_API_KEY
+    # Local model (Ollama / llama.cpp compatible)
+    local:
+      provider_type: openai_compat
+      base_url: http://localhost:11434/v1
+      default_model: llama3.2
+      headers: {}
+      timeout_secs: 60
+      max_retries: 2
 
-    # Local model via Ollama
-    # local:
-    #   provider_type: openai_compat
-    #   base_url: http://localhost:11434/v1
+    # Example: Groq via OpenAI-compatible endpoint
+    groq:
+      provider_type: openai_compat
+      base_url: https://api.groq.com/openai/v1
+      api_key_env: GROQ_API_KEY
+      default_model: llama-3.3-70b-versatile
+      headers: {}
+      timeout_secs: 30
+      max_retries: 3
 
+    # Example: DeepSeek via OpenAI-compatible endpoint
+    deepseek:
+      provider_type: openai_compat
+      base_url: https://api.deepseek.com/v1
+      api_key_env: DEEPSEEK_API_KEY
+      default_model: deepseek-chat
+      headers: {}
+      timeout_secs: 120
+      max_retries: 3
+
+# =============================================================================
+# Agent Loop Configuration
+# =============================================================================
 agent:
+  # Maximum loop iterations per task (default: 100)
   max_iterations: 100
-  max_tool_calls_per_turn: 10
-  confidence_threshold: 0.5   # Escalate below this
-  max_retries: 3
-  enable_decomposition: true   # Break complex goals into sub-tasks
-  enable_summarization: true   # Compress context for long sessions
-  context_limit: 32768         # Token limit before compression
-  compression_ratio: 0.5       # Compress to 50% of limit
 
+  # Maximum tool calls per turn (default: 10)
+  max_tool_calls_per_turn: 10
+
+  # Confidence threshold (0.0–1.0); below this triggers escalation (default: 0.5)
+  confidence_threshold: 0.5
+
+  # Max retries for a single action (default: 3)
+  max_retries: 3
+
+  # Enable goal decomposition for complex tasks (default: true)
+  enable_decomposition: true
+
+  # Enable state summarization for context management (default: true)
+  enable_summarization: true
+
+  # Token limit before triggering context compression (default: 32768)
+  context_limit: 32768
+
+  # Compress context to this ratio of the limit (default: 0.5)
+  compression_ratio: 0.5
+
+# =============================================================================
+# Tool Configuration
+# =============================================================================
 tools:
+  # Enabled tool names
   enabled:
     - file_read
     - file_write
@@ -53,45 +130,115 @@ tools:
     - web_search
     - web_fetch
     - git
+
+  # Disabled tool names (overrides enabled list)
+  disabled: []
+
+  # Default timeout for tool execution in seconds (default: 60)
   default_timeout_secs: 60
-  sandbox_enabled: false
+
+  # Filesystem boundary for tool execution
   path_boundary:
     allowed_read:
       - "."
-      - "/tmp"
     allowed_write:
       - "."
-      - "/tmp"
     denied:
-      - "/etc/passwd"
-      - "/etc/shadow"
-      - "~/.ssh"
+      - /etc/passwd
+      - /etc/shadow
+      - ~/.ssh
 
+  # Enable sandboxing (container/chroot) — default: false
+  sandbox_enabled: false
+
+  # Custom tool directories to scan for additional tools
+  tool_dirs: []
+
+# =============================================================================
+# Memory Configuration
+# =============================================================================
 memory:
+  # Enable persistent memory (default: true)
   enabled: true
+
+  # Database path (SQLite); defaults to ~/.odin/memory.db
+  # db_path: /var/lib/odin/memory.db
+
+  # Maximum entries in working memory (default: 1000)
   max_entries: 1000
+
+  # Auto-save interval in seconds (default: 300)
   save_interval_secs: 300
 
+# =============================================================================
+# Safety & Permissions Configuration
+# =============================================================================
 safety:
+  # Enable command approval prompts for dangerous commands (default: true)
   require_approval: true
-  max_rate_per_minute: 60
-  dangerous_commands:
-    - "rm\\s+-rf"
-    - "git\\s+reset\\s+--hard"
-    - "git\\s+push\\s+--force"
-    - "sudo\\s+"
-    - "chmod\\s+777"
 
+  # Commands that always require approval (regex patterns)
+  dangerous_commands:
+    - rm\s+-rf
+    - git\s+reset\s+--hard
+    - git\s+push\s+--force
+    - sudo\s+
+    - chmod\s+777
+    - '>\s*/dev/'
+    - mkfs\.
+    - dd\s+if=
+
+  # Maximum rate of tool calls per minute (default: 60)
+  max_rate_per_minute: 60
+
+  # Custom permission rules (tool-level allow/deny/ask-user)
+  permissions:
+    - tool_name: shell
+      action: ask_user
+      max_rate_per_minute: 10
+    # - tool_name: file_write
+    #   action: allow
+    #   max_rate_per_minute: 30
+
+# =============================================================================
+# Audit / Logging Configuration
+# =============================================================================
 audit:
+  # Enable audit logging (default: true)
   enabled: true
+
+  # Log file path (defaults to ~/.odin/audit.log)
+  # log_path: /var/log/odin/audit.log
+
+  # Log in JSON format (default: false)
   json_format: false
 
+# =============================================================================
+# Gateway / Interface Configuration
+# =============================================================================
 gateway:
+  # Enable the HTTP API server (default: false)
   http_enabled: false
-  http_addr: "127.0.0.1:9177"
+
+  # HTTP API listen address (default: "127.0.0.1:9177")
+  http_addr: 127.0.0.1:9177
+
+  # Enable Discord bot integration (default: false)
   discord_enabled: false
 
+  # Discord bot token (set directly or via env var)
+  # discord_token: your_bot_token_here
+  discord_token_env: DISCORD_BOT_TOKEN
+
+# =============================================================================
+# Scheduler Configuration
+# =============================================================================
 scheduler:
+  # Enable the scheduler (default: false)
   enabled: false
+
+  # Check interval in seconds (default: 30)
   check_interval_secs: 30
+
+  # Max concurrent jobs (default: 5)
   max_concurrent: 5

@@ -10,7 +10,6 @@
 ///
 /// Note: Uses a dedicated tokio runtime with shutdown_timeout to avoid
 /// the reqwest Client connection pool drain hanging test completion.
-
 use async_trait::async_trait;
 use chrono::Utc;
 use odin_baseline::BaselineAgent;
@@ -66,8 +65,10 @@ impl DeepSeekProvider {
 
     fn track_usage(&self, usage: &TokenUsage) {
         use std::sync::atomic::Ordering;
-        self.total_prompt_tokens.fetch_add(usage.prompt_tokens, Ordering::Relaxed);
-        self.total_completion_tokens.fetch_add(usage.completion_tokens, Ordering::Relaxed);
+        self.total_prompt_tokens
+            .fetch_add(usage.prompt_tokens, Ordering::Relaxed);
+        self.total_completion_tokens
+            .fetch_add(usage.completion_tokens, Ordering::Relaxed);
     }
 }
 
@@ -289,7 +290,10 @@ async fn test_live_deepseek_comparison() {
         "DEEPSEEK_API_KEY not set. Export it or add to ~/.odin/.env:\n  DEEPSEEK_API_KEY=sk-...",
     );
 
-    eprintln!("✓ DeepSeek API key loaded (starts with: {}...)", &api_key[..12]);
+    eprintln!(
+        "✓ DeepSeek API key loaded (starts with: {}...)",
+        &api_key[..12]
+    );
 
     run_comparison(&api_key).await;
     eprintln!("[TEST] ✓ PASSED");
@@ -298,14 +302,15 @@ async fn test_live_deepseek_comparison() {
 }
 
 async fn run_comparison(api_key: &str) {
-    let tasks = vec![
-        "Write a Python function that checks if a string is a palindrome",
-    ];
+    let tasks = vec!["Write a Python function that checks if a string is a palindrome"];
 
     for task in &tasks {
         eprintln!("\n━━━ Task: {} ━━━", task);
 
-        let provider = Arc::new(DeepSeekProvider::new(api_key.to_string(), "deepseek-v4-flash"));
+        let provider = Arc::new(DeepSeekProvider::new(
+            api_key.to_string(),
+            "deepseek-v4-flash",
+        ));
         let engine = LoopEngine::new()
             .with_max_iterations(10)
             .with_provider(provider.clone());

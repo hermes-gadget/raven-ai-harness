@@ -123,7 +123,11 @@ impl AuditLoggerImpl {
             std::fs::create_dir_all(parent).map_err(|e| {
                 OdinError::Io(std::io::Error::new(
                     std::io::ErrorKind::Other,
-                    format!("Failed to create audit log directory '{}': {}", parent.display(), e),
+                    format!(
+                        "Failed to create audit log directory '{}': {}",
+                        parent.display(),
+                        e
+                    ),
                 ))
             })?;
         }
@@ -166,9 +170,7 @@ impl AuditLoggerImpl {
         let count = entries.len();
         for buffered in &entries {
             let line = if self.config.json_format {
-                serde_json::to_string(&buffered.entry).map_err(|e| {
-                    OdinError::Serialization(e)
-                })?
+                serde_json::to_string(&buffered.entry).map_err(|e| OdinError::Serialization(e))?
             } else {
                 format!(
                     "[{}] [{}] [{}] [{}] {}: {}\n",
@@ -403,10 +405,7 @@ mod tests {
             .await
             .unwrap();
 
-        let results = logger
-            .query(Some(agent1), None, None, 10)
-            .await
-            .unwrap();
+        let results = logger.query(Some(agent1), None, None, 10).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].agent_id, agent1);
     }
@@ -470,7 +469,11 @@ mod tests {
         let session_id = Uuid::new_v4();
 
         logger
-            .log(make_entry(agent_id, session_id, AuditEventType::SessionStart))
+            .log(make_entry(
+                agent_id,
+                session_id,
+                AuditEventType::SessionStart,
+            ))
             .await
             .unwrap();
 
