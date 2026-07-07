@@ -146,9 +146,20 @@ async fn cmd_run(
     // Create the provider via the factory
     let provider = odin_providers::create_provider(&provider_cfg)?;
 
+    // Create the policy engine from safety config
+    let policy_engine = Arc::new(odin_permissions::PolicyEngine::new(
+        config.safety.permissions.clone(),
+        &config.safety.dangerous_commands,
+        config.tools.path_boundary.clone(),
+        config.safety.max_rate_per_minute,
+        config.safety.require_approval,
+    ));
+    tracing::info!("[CLI] Policy engine initialized");
+
     // Create the loop engine with the provider attached
     let engine = odin_loop::LoopEngine::new()
         .with_provider(provider.clone())
+        .with_policy_engine(policy_engine.clone())
         .with_max_iterations(max_iterations);
 
     // Create a tool registry and register built-in tools
@@ -359,6 +370,16 @@ async fn cmd_serve(addr: String, config_path: Option<PathBuf>) -> anyhow::Result
         odin_core::types::PathBoundary::default(),
     ));
 
+    // Create the policy engine from safety config
+    let policy_engine = Arc::new(odin_permissions::PolicyEngine::new(
+        config.safety.permissions.clone(),
+        &config.safety.dangerous_commands,
+        config.tools.path_boundary.clone(),
+        config.safety.max_rate_per_minute,
+        config.safety.require_approval,
+    ));
+    tracing::info!("[CLI/serve] Policy engine initialized");
+
     // Register built-in tools
     let _ = tool_registry.register(Box::new(odin_tools::builtins::file::FileRead::new(
         sandbox.clone(),
@@ -397,6 +418,7 @@ async fn cmd_serve(addr: String, config_path: Option<PathBuf>) -> anyhow::Result
         Arc::new(move |req: odin_gateway::ChatRequest| {
             let provider = provider.clone();
             let tool_registry = tool_registry.clone();
+            let policy_engine = policy_engine.clone();
             let tools = tools.clone();
             let memory = memory.clone();
             let audit_logger = audit_logger.clone();
@@ -405,6 +427,7 @@ async fn cmd_serve(addr: String, config_path: Option<PathBuf>) -> anyhow::Result
 
                 let engine = odin_loop::LoopEngine::new()
                     .with_provider(provider.clone())
+                    .with_policy_engine(policy_engine.clone())
                     .with_max_iterations(req.max_iterations.unwrap_or(100))
                     .with_tool_registry(tool_registry.clone());
 

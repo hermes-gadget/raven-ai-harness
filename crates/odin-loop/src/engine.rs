@@ -34,6 +34,8 @@ pub struct Engine {
     escalation_provider: Option<Arc<dyn Provider>>,
     /// Optional tool registry for dispatching tool calls
     tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
+    /// Optional policy engine for permission checking
+    policy_engine: Option<Arc<odin_permissions::PolicyEngine>>,
 }
 
 impl Engine {
@@ -47,6 +49,7 @@ impl Engine {
             provider: None,
             escalation_provider: None,
             tool_registry: None,
+            policy_engine: None,
         }
     }
 
@@ -65,6 +68,12 @@ impl Engine {
     /// Attach a tool registry for dispatching real tool calls.
     pub fn with_tool_registry(mut self, registry: Arc<odin_tools::ToolRegistry>) -> Self {
         self.tool_registry = Some(registry);
+        self
+    }
+
+    /// Attach a policy engine for permission checking on tool calls.
+    pub fn with_policy_engine(mut self, engine: Arc<odin_permissions::PolicyEngine>) -> Self {
+        self.policy_engine = Some(engine);
         self
     }
 
@@ -141,6 +150,7 @@ impl LoopEngineTrait for Engine {
             provider: self.provider.clone(),
             escalation_provider: self.escalation_provider.clone(),
             tool_registry: self.tool_registry.clone(),
+            policy_engine: self.policy_engine.clone(),
         };
 
         let mut total_tool_calls = 0u32;
@@ -298,6 +308,7 @@ impl LoopEngineTrait for Engine {
             provider: self.provider.clone(),
             escalation_provider: self.escalation_provider.clone(),
             tool_registry: self.tool_registry.clone(),
+            policy_engine: self.policy_engine.clone(),
         };
 
         match phase {
@@ -815,5 +826,378 @@ mod tests {
         // Looped engine decomposes — baseline doesn't
         assert!(!looped.sub_tasks.is_empty());
         assert!(baseline_result.sub_tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_comparison_metrics() {
+        // A small-model provider that cycles through short/ambiguous responses
+        // to simulate a weak model where the looped engine's structured approach
+        // should provide better measurability (decomposition, iteration tracking).
+        struct SmallModelProvider {
+            responses: Vec<&'static str>,
+            call_count: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl ProviderTrait for SmallModelProvider {
+            fn name(&self) -> &str {
+                "small-model"
+            }
+
+            async fn list_models(&self) -> OdinResult<Vec<ModelInfo>> {
+                Ok(vec![])
+            }
+
+            async fn chat(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _options: &CompletionOptions,
+            ) -> OdinResult<ChatResponse> {
+                let idx = self.call_count.fetch_add(1, Ordering::SeqCst);
+                let text = self.responses[idx % self.responses.len()];
+                Ok(ChatResponse {
+                    message: Message::assistant(text),
+                    usage: TokenUsage::default(),
+                    finish_reason: Some("stop".into()),
+                    model: "small-model".into(),
+                })
+            }
+
+            async fn chat_stream(
+                &self,
+                _model: &str,
+                _messages: &[Message],
+                _tools: &[ToolSchema],
+                _options: &CompletionOptions,
+            ) -> OdinResult<Box<dyn ChatStream>> {
+                unimplemented!()
+            }
+
+            async fn health_check(&self) -> OdinResult<bool> {
+                Ok(true)
+            }
+        }
+
+        // Three task types with increasing complexity for comparison
+        let task_types: Vec<(&str, &str)> = vec![
+            ("Simple", "Write a hello world program"),
+            ("Medium", "Fix a bug in the login system"),
+            (
+                "Complex",
+                "Build a REST API with authentication and database",
+            ),
+        ];
+
+        // Short/ambiguous responses simulating a weak small model
+        let small_responses: Vec<&'static str> = vec!["ok", "done", "k", "sure", "yes", "fine"];
+
+        println!();
+        println!("{:=<140}", "");
+        println!(
+            "{:<14} | {:<18} | {:<18} | {:<18} | {:<18} | {:<12} | {:<10}",
+            "Task",
+            "Looped Iters",
+            "Baseline Iters",
+            "Looped Conf",
+            "Baseline Conf",
+            "Sub-tasks",
+            "Looped Ok"
+        );
+        println!("{:=<140}", "");
+
+        for (task_name, task_goal) in &task_types {
+            // Use identical but separate provider instances so each engine
+            // gets its own independent sequence of short responses
+            let looped_provider = Arc::new(SmallModelProvider {
+                responses: small_responses.clone(),
+                call_count: AtomicUsize::new(0),
+            });
+            let baseline_provider = Arc::new(SmallModelProvider {
+                responses: small_responses.clone(),
+                call_count: AtomicUsize::new(0),
+            });
+
+            let loop_engine = Engine::new()
+                .with_provider(looped_provider)
+                .with_max_iterations(10);
+
+            let baseline = odin_baseline::BaselineAgent::new(baseline_provider, vec![], 10);
+
+            let task = make_task(task_goal);
+            let looped = loop_engine.execute_task(&task).await.unwrap();
+            let baseline_result = baseline.execute_task(&task).await.unwrap();
+
+            println!(
+                "{:<14} | {:<18} | {:<18} | {:<18.4} | {:<18.4} | {:<12} | {:<10}",
+                task_name,
+                looped.iterations,
+                baseline_result.iterations,
+                looped.confidence,
+                baseline_result.confidence,
+                looped.sub_tasks.len(),
+                looped.success,
+            );
+
+            // ── Metric assertions ────────────────────────────────────
+
+            // 1. Looped engine decomposes goals into sub-tasks (structural advantage)
+            assert!(
+                !looped.sub_tasks.is_empty(),
+                "Looped engine should decompose task '{}' into sub-tasks, got {}",
+                task_goal,
+                looped.sub_tasks.len()
+            );
+
+            // 2. Baseline does NOT decompose (no planning phase)
+            assert!(
+                baseline_result.sub_tasks.is_empty(),
+                "Baseline should not have sub-tasks for '{}', got {}",
+                task_goal,
+                baseline_result.sub_tasks.len()
+            );
+
+            // 3. Both engines actually ran (iterations > 0)
+            assert!(
+                looped.iterations > 0,
+                "Looped engine should have at least 1 iteration for '{}'",
+                task_goal
+            );
+            assert!(
+                baseline_result.iterations > 0,
+                "Baseline should have at least 1 iteration for '{}'",
+                task_goal
+            );
+
+            // 4. Looped confidence is non-negative (with small-model short responses
+            //    it may be low, but the scoring should never produce negative values)
+            assert!(
+                looped.confidence >= 0.0,
+                "Looped confidence should be >= 0 for '{}', got {}",
+                task_goal,
+                looped.confidence
+            );
+
+            // 5. Looped iterations stay within configured bounds
+            assert!(
+                looped.iterations <= 10,
+                "Looped iterations ({}) should not exceed limit 10 for '{}'",
+                looped.iterations,
+                task_goal
+            );
+
+            // 6. Baseline completes in a single iteration (no tool calls -> immediate return)
+            assert!(
+                baseline_result.iterations <= 1,
+                "Baseline should complete in 1 iteration for '{}', got {}",
+                task_goal,
+                baseline_result.iterations
+            );
+
+            // 7. Looped confidence is at least > 0 (the heuristic scorer
+            //    always gives a non-negative score, even for short responses)
+            assert!(
+                looped.confidence > 0.0,
+                "Looped confidence should be positive (> 0) for '{}', got {}",
+                task_goal,
+                looped.confidence
+            );
+        }
+
+        println!("{:=<140}", "");
+        println!();
+    }
+
+    // ── Safety Boundary Tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_sandbox_denies_write_outside_boundary() {
+        // Create a sandbox with restrictive boundaries (only /tmp allowed)
+        let boundary = odin_core::types::PathBoundary {
+            allowed_read: vec!["/tmp".into()],
+            allowed_write: vec!["/tmp".into()],
+            denied: vec![],
+        };
+        let sandbox = odin_tools::Sandbox::new(boundary);
+
+        // /etc/passwd is strictly outside the /tmp write boundary
+        let result = sandbox.check_write(std::path::Path::new("/etc/passwd"));
+        assert!(result.is_err(), "Write outside boundary should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("not within allowed") || err.contains("denied"),
+            "Error should mention boundary violation: {err}"
+        );
+
+        // Writing to a path inside /tmp should succeed (parent exists)
+        let result = sandbox.check_write(std::path::Path::new("/tmp/allowed_boundary_test.txt"));
+        assert!(
+            result.is_ok(),
+            "Write inside boundary should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dangerous_shell_command_blocked() {
+        // Register a Shell tool
+        let shell = odin_tools::builtins::shell::Shell::new();
+
+        // Verify is_dangerous detection works correctly
+        assert!(shell.is_dangerous("rm -rf /"));
+        assert!(shell.is_dangerous("sudo rm -rf /"));
+        assert!(shell.is_dangerous("git push --force origin main"));
+        assert!(shell.is_dangerous("chmod 777 /etc/passwd"));
+        assert!(!shell.is_dangerous("echo hello"));
+        assert!(!shell.is_dangerous("ls -la"));
+        assert!(!shell.is_dangerous("cat /etc/hostname"));
+
+        // Execute via the tool_registry to verify dangerous commands are blocked
+        let tool_registry = Arc::new(odin_tools::ToolRegistry::new());
+        let _ = tool_registry.register(Box::new(odin_tools::builtins::shell::Shell::new()));
+        let shell_tool = tool_registry.get("shell").unwrap();
+
+        let args = serde_json::json!({"command": "rm -rf /", "timeout_secs": 5});
+        let context = odin_core::traits::ToolContext {
+            agent_id: uuid::Uuid::default(),
+            session_id: uuid::Uuid::default(),
+            working_dir: std::path::PathBuf::from("/tmp"),
+            env: std::collections::HashMap::new(),
+        };
+        let result = shell_tool.execute(args, &context).await.unwrap();
+        assert!(!result.success, "Dangerous command should not succeed");
+        assert!(
+            result.error.as_deref().unwrap_or("").contains("dangerous"),
+            "Error should mention dangerous pattern: {:?}",
+            result.error
+        );
+    }
+
+    // ── CLI Integration Test ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_cli_integration_mocked_provider() {
+        // Simulate cmd_run flow:
+        // 1. Create sandbox-restricted file tools
+        // 2. Create provider (mocked here) + tool_registry + engine
+        // 3. Submit task through engine
+        // 4. Verify result has the expected shape of a real pipeline run
+
+        let sandbox = Arc::new(odin_tools::Sandbox::new(odin_core::types::PathBoundary {
+            allowed_read: vec!["/tmp".into()],
+            allowed_write: vec!["/tmp".into()],
+            denied: vec![],
+        }));
+
+        // MockProvider returns: plan text, then shell call, file_read call,
+        // then verify, decide, and fallback text responses.
+        // (Pop-order: last element consumed first, so order here is reverse
+        //  of call order: Plan → Act(shell) → Act(file_read) → Verify → Decide → fallbacks)
+        let mock = Arc::new(MockProvider::new(vec![
+            mk_resp("ok."),
+            mk_resp("ok."),
+            mk_resp("Success. Task is done."),
+            mk_resp("Verification passed. All good."),
+            mk_tc_resp("file_read", r#"{"path":"/tmp/hostname"}"#),
+            mk_tc_resp("shell", r#"{"command":"echo hello","timeout_secs":10}"#),
+            mk_resp("Plan: decompose the goal into sub-tasks."),
+        ]));
+
+        let tool_registry = Arc::new(odin_tools::ToolRegistry::new());
+        let _ = tool_registry.register(Box::new(odin_tools::builtins::shell::Shell::new()));
+        let _ = tool_registry.register(Box::new(odin_tools::builtins::file::FileRead::new(
+            sandbox.clone(),
+        )));
+
+        let engine = Engine::new()
+            .with_provider(mock.clone())
+            .with_tool_registry(tool_registry)
+            .with_max_iterations(10);
+
+        let task = make_task("Run a shell command and read a file");
+        let result = engine.execute_task(&task).await.unwrap();
+
+        // Verify the result has the expected shape of a real pipeline
+        assert!(
+            result.tool_calls >= 1,
+            "Expected at least 1 tool call, got {}",
+            result.tool_calls
+        );
+        assert!(result.iterations > 0, "Should have at least 1 iteration");
+        assert!(result.iterations <= 10, "Should not exceed max iterations");
+        assert!(!result.summary.is_empty(), "Summary should not be empty");
+        assert!(
+            !result.sub_tasks.is_empty(),
+            "Should have decomposed sub-tasks"
+        );
+    }
+
+    // ── Permission Policy Tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_policy_allows_and_denies_tools() {
+        use odin_core::traits::PermissionEngine;
+        use odin_core::types::{PermissionAction, PermissionRule};
+        use odin_permissions::policy::PolicyEngine;
+
+        // Policy: allow shell, deny file_write
+        let rules = vec![
+            PermissionRule {
+                tool_name: "shell".into(),
+                action: PermissionAction::Allow,
+                require_approval: false,
+                max_rate_per_minute: None,
+            },
+            PermissionRule {
+                tool_name: "file_write".into(),
+                action: PermissionAction::Deny,
+                require_approval: true,
+                max_rate_per_minute: None,
+            },
+        ];
+
+        let policy = PolicyEngine::new(
+            rules,
+            &[], // no additional dangerous commands
+            odin_core::types::PathBoundary::default(),
+            60,    // default rate limit
+            false, // don't require approval by default
+        );
+
+        let agent_id = uuid::Uuid::new_v4();
+
+        // file_write should be explicitly denied
+        let result = policy
+            .check_tool(agent_id, "file_write", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            PermissionAction::Deny,
+            "file_write should be denied by policy"
+        );
+
+        // shell should be explicitly allowed
+        let result = policy
+            .check_tool(agent_id, "shell", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            PermissionAction::Allow,
+            "shell should be allowed by policy"
+        );
+
+        // An unlisted tool (e.g. file_read) should fall back to default behavior
+        let result = policy
+            .check_tool(agent_id, "file_read", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            PermissionAction::Allow,
+            "Unlisted tool with require_approval=false should be allowed"
+        );
     }
 }

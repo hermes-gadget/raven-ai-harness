@@ -39,6 +39,8 @@ pub struct PhaseContext {
     pub escalation_provider: Option<Arc<dyn Provider>>,
     /// Optional tool registry for dispatching real tool calls
     pub tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
+    /// Optional policy engine for permission checking on tool calls
+    pub policy_engine: Option<Arc<odin_permissions::PolicyEngine>>,
 }
 
 // ── Plan Phase ──────────────────────────────────────────────────────
@@ -255,6 +257,76 @@ impl Phase for ActPhase {
                                             continue;
                                         }
                                     };
+
+                                // Check policy engine before executing tool
+                                let policy_denied = if let Some(ref policy) = context.policy_engine
+                                {
+                                    // For shell tools: check dangerous commands
+                                    if tool_name == "shell" {
+                                        if let Some(cmd) =
+                                            args.get("command").and_then(|v| v.as_str())
+                                        {
+                                            if policy.is_dangerous_command(cmd) {
+                                                true
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    // For file_write: check path boundaries
+                                    else if tool_name == "file_write" {
+                                        if let Some(path) =
+                                            args.get("path").and_then(|v| v.as_str())
+                                        {
+                                            policy
+                                                .check_path_boundary(
+                                                    std::path::Path::new(path),
+                                                    true,
+                                                )
+                                                .is_err()
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    // For file_read: check path boundaries
+                                    else if tool_name == "file_read" {
+                                        if let Some(path) =
+                                            args.get("path").and_then(|v| v.as_str())
+                                        {
+                                            policy
+                                                .check_path_boundary(
+                                                    std::path::Path::new(path),
+                                                    false,
+                                                )
+                                                .is_err()
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                } else {
+                                    false
+                                };
+
+                                if policy_denied {
+                                    let tr = ToolResult {
+                                        call_id: tc.id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        success: false,
+                                        output: String::new(),
+                                        error: Some(format!(
+                                            "Permission denied: tool '{}' blocked by policy",
+                                            tool_name
+                                        )),
+                                        duration_ms: 0,
+                                        timestamp: chrono::Utc::now(),
+                                    };
+                                    results.push(tr);
+                                    continue;
+                                }
 
                                 let tool_context = ToolContext {
                                     agent_id: uuid::Uuid::default(),

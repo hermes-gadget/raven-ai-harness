@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 odin-core.workspace = true
+odin-permissions = { path = "../odin-permissions" }
 odin-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -20,5 +21,6 @@ parking_lot.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 odin-baseline = { path = "../odin-baseline" }
+odin-permissions = { path = "../odin-permissions" }
 rand = "0.8"
 reqwest = { workspace = true }
