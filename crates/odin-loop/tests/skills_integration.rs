@@ -39,13 +39,21 @@ fn setup_test_skills_dir() -> (tempfile::TempDir, SkillRegistry) {
 
     std::fs::write(
         dir.path().join("code-review.md"),
-        test_skill_content("code-review", "Review code for bugs and style", &["file_read", "git"]),
+        test_skill_content(
+            "code-review",
+            "Review code for bugs and style",
+            &["file_read", "git"],
+        ),
     )
     .unwrap();
 
     std::fs::write(
         dir.path().join("git-workflow.md"),
-        test_skill_content("git-workflow", "Standard git branch/commit/PR workflow", &["git", "shell"]),
+        test_skill_content(
+            "git-workflow",
+            "Standard git branch/commit/PR workflow",
+            &["git", "shell"],
+        ),
     )
     .unwrap();
 
@@ -136,7 +144,10 @@ async fn test_load_skill_after_execution() {
     let content = engine.load_skill("code-review");
     assert!(content.is_some(), "Should find code-review skill");
     let loaded = content.unwrap();
-    assert!(loaded.contains("## code-review Instructions"), "Should contain skill instructions");
+    assert!(
+        loaded.contains("## code-review Instructions"),
+        "Should contain skill instructions"
+    );
 
     let missing = engine.load_skill("nonexistent");
     assert!(missing.is_none(), "Non-existent skill should return None");
@@ -173,7 +184,11 @@ async fn test_skills_list_via_registry() {
 
     let code_review = registry.get("code-review").unwrap();
     assert_eq!(code_review.description, "Review code for bugs and style");
-    assert!(code_review.required_tools.contains(&"file_read".to_string()));
+    assert!(
+        code_review
+            .required_tools
+            .contains(&"file_read".to_string())
+    );
     assert!(code_review.required_tools.contains(&"git".to_string()));
     assert!(code_review.enabled);
 }

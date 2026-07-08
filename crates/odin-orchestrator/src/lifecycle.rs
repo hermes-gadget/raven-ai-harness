@@ -43,7 +43,10 @@ pub enum AgentPhase {
 impl AgentPhase {
     /// Whether this is a terminal state.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, AgentPhase::Done | AgentPhase::Failed | AgentPhase::Cancelled)
+        matches!(
+            self,
+            AgentPhase::Done | AgentPhase::Failed | AgentPhase::Cancelled
+        )
     }
 
     /// Whether this is an active/running state.
@@ -188,7 +191,10 @@ impl AgentLifecycle {
 
     /// Mark as under review.
     pub fn review(&mut self) {
-        self.transition(AgentPhase::Reviewing, Some("Under orchestrator review".into()));
+        self.transition(
+            AgentPhase::Reviewing,
+            Some("Under orchestrator review".into()),
+        );
     }
 
     /// Retry from failed state.
@@ -218,9 +224,8 @@ impl AgentLifecycle {
 
     /// Duration of active execution (excluding blocked/waiting).
     pub fn active_duration(&self) -> Option<chrono::Duration> {
-        self.started_at.map(|start| {
-            self.finished_at.unwrap_or_else(Utc::now) - start
-        })
+        self.started_at
+            .map(|start| self.finished_at.unwrap_or_else(Utc::now) - start)
     }
 
     /// Get the reason for the current phase.

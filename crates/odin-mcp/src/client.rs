@@ -58,9 +58,7 @@ impl McpClient {
             }
         });
 
-        let response = self
-            .send_request_inner("initialize", Some(params))
-            .await?;
+        let response = self.send_request_inner("initialize", Some(params)).await?;
 
         let result: McpInitializeResult =
             serde_json::from_value(response.result.ok_or_else(|| {
@@ -87,9 +85,7 @@ impl McpClient {
     pub async fn list_tools(&self) -> McpResult<Vec<McpToolDef>> {
         self.ensure_initialized()?;
 
-        let response = self
-            .send_request_inner("tools/list", None)
-            .await?;
+        let response = self.send_request_inner("tools/list", None).await?;
 
         let result: McpToolListResult =
             serde_json::from_value(response.result.ok_or_else(|| {
@@ -104,11 +100,7 @@ impl McpClient {
     ///
     /// The `name` must match one of the tools returned by [`list_tools`](#method.list_tools).
     /// `args` is a JSON object with the tool's input parameters.
-    pub async fn call_tool(
-        &self,
-        name: &str,
-        args: Value,
-    ) -> McpResult<McpToolResult> {
+    pub async fn call_tool(&self, name: &str, args: Value) -> McpResult<McpToolResult> {
         self.ensure_initialized()?;
 
         let params = McpToolCallParams::new(name, args);
@@ -116,11 +108,10 @@ impl McpClient {
             .send_request_inner("tools/call", Some(serde_json::to_value(params)?))
             .await?;
 
-        let result: McpToolResult =
-            serde_json::from_value(response.result.ok_or_else(|| {
-                McpError::InvalidResponse("Missing result in tools/call response".into())
-            })?)
-            .map_err(|e| McpError::InvalidResponse(format!("Invalid tools/call result: {e}")))?;
+        let result: McpToolResult = serde_json::from_value(response.result.ok_or_else(|| {
+            McpError::InvalidResponse("Missing result in tools/call response".into())
+        })?)
+        .map_err(|e| McpError::InvalidResponse(format!("Invalid tools/call result: {e}")))?;
 
         Ok(result)
     }

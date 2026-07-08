@@ -185,7 +185,9 @@ impl Composer {
         let parts: Vec<&str> = goal.split_inclusive(&[',', ';'][..]).collect();
 
         if parts.len() > 1 {
-            parts.iter().map(|s| s.trim().trim_matches(&[',', ';'][..]).trim().to_string())
+            parts
+                .iter()
+                .map(|s| s.trim().trim_matches(&[',', ';'][..]).trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect()
         } else {
@@ -398,7 +400,7 @@ impl Composer {
         let a = self.agents.get(&a_id);
         let b = self.agents.get(&b_id);
         match (a, b) {
-            (Some((a_agent, _)), Some((b_agent, _))) => !a_agent.file_overlap(&b_agent).is_empty(),
+            (Some((a_agent, _)), Some((b_agent, _))) => !a_agent.file_overlap(b_agent).is_empty(),
             _ => false,
         }
     }
@@ -428,7 +430,9 @@ impl Composer {
 
     /// Merge all collected results into a final response.
     pub fn merge_results(&self, results: Vec<SubAgentResult>) -> ComposerResult {
-        let merged = self.merge_resolver.merge(results, self.config.merge_strategy);
+        let merged = self
+            .merge_resolver
+            .merge(results, self.config.merge_strategy);
 
         ComposerResult {
             goal: self
@@ -521,9 +525,7 @@ impl Composer {
 
     /// Check if all work is complete.
     pub fn is_all_done(&self) -> bool {
-        self.agents
-            .values()
-            .all(|(a, _)| a.phase.is_terminal())
+        self.agents.values().all(|(a, _)| a.phase.is_terminal())
     }
 
     /// Check if any agent has failed.
@@ -637,7 +639,10 @@ mod tests {
         assert_eq!(composer.get_agent(&id).unwrap().1.phase, AgentPhase::Queued);
 
         composer.start_agent(id).unwrap();
-        assert_eq!(composer.get_agent(&id).unwrap().1.phase, AgentPhase::Running);
+        assert_eq!(
+            composer.get_agent(&id).unwrap().1.phase,
+            AgentPhase::Running
+        );
     }
 
     #[test]
@@ -693,11 +698,17 @@ mod tests {
         composer.start_agent(id).unwrap();
 
         composer.pause_all();
-        assert_eq!(composer.get_agent(&id).unwrap().0.phase, AgentPhase::Blocked);
+        assert_eq!(
+            composer.get_agent(&id).unwrap().0.phase,
+            AgentPhase::Blocked
+        );
 
         let resumed = composer.resume_all().unwrap();
         assert_eq!(resumed, 1);
-        assert_eq!(composer.get_agent(&id).unwrap().0.phase, AgentPhase::Running);
+        assert_eq!(
+            composer.get_agent(&id).unwrap().0.phase,
+            AgentPhase::Running
+        );
     }
 
     #[test]
@@ -819,7 +830,9 @@ mod tests {
     #[test]
     fn test_reprioritize() {
         let mut composer = Composer::default();
-        let config = SubAgentConfigBuilder::new("test", "do work").priority(10).build();
+        let config = SubAgentConfigBuilder::new("test", "do work")
+            .priority(10)
+            .build();
         let id = composer.register_agent(config);
 
         composer.reprioritize(id, 1).unwrap();

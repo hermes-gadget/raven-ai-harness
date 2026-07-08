@@ -12,6 +12,6 @@ pub use discord::DiscordGateway;
 pub use http::{
     ChatRequest, ChatResponse, DoctorReportResponse, GatewayState, HealthDependencies,
     HealthResponse, LockSummary, MetricsResponse, OrchestrateRequest, OrchestrateResponse,
-    OrchestrateStatusResponse, OrchestrateTaskInfo, TaskHandlerFn, ToolInfo,
-    ToolsListResponse, ValidationReportResponse, build_router, run_http_server,
+    OrchestrateStatusResponse, OrchestrateTaskInfo, TaskHandlerFn, ToolInfo, ToolsListResponse,
+    ValidationReportResponse, build_router, run_http_server,
 };

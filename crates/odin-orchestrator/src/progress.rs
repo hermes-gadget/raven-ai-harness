@@ -64,11 +64,7 @@ impl ProgressTracker {
 
     /// Add or update a workstream.
     pub fn update_workstream(&mut self, status: WorkstreamStatus) {
-        if let Some(existing) = self
-            .workstreams
-            .iter_mut()
-            .find(|w| w.id == status.id)
-        {
+        if let Some(existing) = self.workstreams.iter_mut().find(|w| w.id == status.id) {
             *existing = status;
         } else {
             self.workstreams.push(status);
@@ -130,11 +126,7 @@ impl ProgressTracker {
     /// Format a compact one-line status.
     pub fn format_compact(&self) -> String {
         let (done, total) = self.graph_progress.unwrap_or((0, 0));
-        let active = self
-            .workstreams
-            .iter()
-            .filter(|w| w.running > 0)
-            .count();
+        let active = self.workstreams.iter().filter(|w| w.running > 0).count();
         format!(
             "📊 {}/{} nodes | {} active workstream(s)",
             done, total, active
@@ -146,7 +138,13 @@ impl ProgressTracker {
 mod tests {
     use super::*;
 
-    fn make_workstream(label: &str, completed: usize, running: usize, queued: usize, total: usize) -> WorkstreamStatus {
+    fn make_workstream(
+        label: &str,
+        completed: usize,
+        running: usize,
+        queued: usize,
+        total: usize,
+    ) -> WorkstreamStatus {
         WorkstreamStatus {
             id: Uuid::new_v4(),
             label: label.into(),

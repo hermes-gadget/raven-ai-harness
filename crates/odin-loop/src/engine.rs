@@ -6,7 +6,9 @@
 
 use async_trait::async_trait;
 use odin_core::error::OdinResult;
-use odin_core::traits::{AuditLogger, LoopEngine as LoopEngineTrait, LoopState, PhaseResult, Provider};
+use odin_core::traits::{
+    AuditLogger, LoopEngine as LoopEngineTrait, LoopState, PhaseResult, Provider,
+};
 use odin_core::types::*;
 use std::sync::Arc;
 

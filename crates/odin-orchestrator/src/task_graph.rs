@@ -118,7 +118,11 @@ impl TaskGraph {
 
     /// Add an edge (dependency) to the graph.
     pub fn add_edge(&mut self, from: NodeId, to: NodeId) -> &mut Self {
-        self.edges.push(TaskEdge { from, to, label: None });
+        self.edges.push(TaskEdge {
+            from,
+            to,
+            label: None,
+        });
         self
     }
 
@@ -148,15 +152,12 @@ impl TaskGraph {
 
     /// Check if all upstream dependencies of a node are done.
     fn all_upstream_done(&self, node_id: NodeId) -> bool {
-        self.edges
-            .iter()
-            .filter(|e| e.to == node_id)
-            .all(|e| {
-                self.nodes
-                    .get(&e.from)
-                    .map(|n| n.status == TaskNodeStatus::Done)
-                    .unwrap_or(true)
-            })
+        self.edges.iter().filter(|e| e.to == node_id).all(|e| {
+            self.nodes
+                .get(&e.from)
+                .map(|n| n.status == TaskNodeStatus::Done)
+                .unwrap_or(true)
+        })
     }
 
     /// Get all nodes that are independent (no dependencies between them) and can run in parallel.
@@ -363,7 +364,11 @@ mod tests {
         let b = graph.add_node(make_node("b", "left"));
         let c = graph.add_node(make_node("c", "right"));
         let d = graph.add_node(make_node("d", "end"));
-        graph.add_edge(a, b).add_edge(a, c).add_edge(b, d).add_edge(c, d);
+        graph
+            .add_edge(a, b)
+            .add_edge(a, c)
+            .add_edge(b, d)
+            .add_edge(c, d);
 
         let sorted = graph.topological_sort().unwrap();
         assert_eq!(sorted[0], a);

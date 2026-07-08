@@ -58,7 +58,11 @@ impl ToolCatalog {
 
         for tool in &tools {
             let name = tool.name().to_string();
-            let tags: Vec<String> = tool.capability_tags().iter().map(|s| s.to_string()).collect();
+            let tags: Vec<String> = tool
+                .capability_tags()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
             let primary_category = tags.first().cloned().unwrap_or_else(|| "other".into());
 
             // Collect all unique tags
@@ -207,8 +211,16 @@ mod tests {
             "categories should include 'filesystem', got: {:?}",
             cats
         );
-        assert!(cats.contains(&"shell"), "should include 'shell', got: {:?}", cats);
-        assert!(cats.contains(&"web"), "should include 'web', got: {:?}", cats);
+        assert!(
+            cats.contains(&"shell"),
+            "should include 'shell', got: {:?}",
+            cats
+        );
+        assert!(
+            cats.contains(&"web"),
+            "should include 'web', got: {:?}",
+            cats
+        );
     }
 
     #[test]

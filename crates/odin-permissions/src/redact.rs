@@ -191,34 +191,106 @@ impl SecretRedactor {
         let mut v = Vec::new();
 
         // ── Secrets: API Keys & Tokens ──────────────────────────────────
-        v.push(compile(r"sk-[a-zA-Z0-9]{20,}", "OpenAI API key", PatternCategory::Secret));
-        v.push(compile(r"sk-ant-[a-zA-Z0-9_-]{20,}", "Anthropic API key", PatternCategory::Secret));
-        v.push(compile(r"gh[pousr]_[a-zA-Z0-9]{20,}", "GitHub token", PatternCategory::Secret));
-        v.push(compile(r"glpat-[a-zA-Z0-9_-]{20,}", "GitLab personal access token", PatternCategory::Secret));
-        v.push(compile(r"xox[bprs]-\d{11,}-\d{11,}-[a-zA-Z0-9]{24,}", "Slack token", PatternCategory::Secret));
-        v.push(compile(r"AKIA[0-9A-Z]{16}", "AWS access key", PatternCategory::Secret));
-        v.push(compile(r"(?i)aws_secret_access_key[=:]\s*[a-zA-Z0-9/+=]{20,}", "AWS secret key", PatternCategory::Secret));
-        v.push(compile(r"(?i)(api[_-]?key|apikey|api[_-]?secret)[=:]\s*[a-zA-Z0-9_-]{16,}", "Generic API key assignment", PatternCategory::Secret));
-        v.push(compile(r"(?i)(token|secret|password|passwd)[=:]\s*\S{8,}", "Credential assignment", PatternCategory::Secret));
-        v.push(compile(r"(?i)(Authorization|auth)[=:]\s*[Bb]earer\s+[a-zA-Z0-9._\-+/=]{20,}", "Authorization header", PatternCategory::Secret));
-        v.push(compile(r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}", "JWT token", PatternCategory::Secret));
+        v.push(compile(
+            r"sk-[a-zA-Z0-9]{20,}",
+            "OpenAI API key",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"sk-ant-[a-zA-Z0-9_-]{20,}",
+            "Anthropic API key",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"gh[pousr]_[a-zA-Z0-9]{20,}",
+            "GitHub token",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"glpat-[a-zA-Z0-9_-]{20,}",
+            "GitLab personal access token",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"xox[bprs]-\d{11,}-\d{11,}-[a-zA-Z0-9]{24,}",
+            "Slack token",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"AKIA[0-9A-Z]{16}",
+            "AWS access key",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"(?i)aws_secret_access_key[=:]\s*[a-zA-Z0-9/+=]{20,}",
+            "AWS secret key",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"(?i)(api[_-]?key|apikey|api[_-]?secret)[=:]\s*[a-zA-Z0-9_-]{16,}",
+            "Generic API key assignment",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"(?i)(token|secret|password|passwd)[=:]\s*\S{8,}",
+            "Credential assignment",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"(?i)(Authorization|auth)[=:]\s*[Bb]earer\s+[a-zA-Z0-9._\-+/=]{20,}",
+            "Authorization header",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}",
+            "JWT token",
+            PatternCategory::Secret,
+        ));
 
         // ── Secrets: Private Keys ───────────────────────────────────────
-        v.push(compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----", "Private key header", PatternCategory::Secret));
-        v.push(compile(r"-----BEGIN PGP PRIVATE KEY BLOCK-----", "PGP private key", PatternCategory::Secret));
+        v.push(compile(
+            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+            "Private key header",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"-----BEGIN PGP PRIVATE KEY BLOCK-----",
+            "PGP private key",
+            PatternCategory::Secret,
+        ));
 
         // ── Secrets: Connection Strings ──────────────────────────────────
-        v.push(compile(r"(?i)(?:mongodb|mysql|postgres(?:ql)?|redis|sqlite)://[^@\s]+:[^@\s]+@[^\s]+", "Database connection string", PatternCategory::Secret));
-        v.push(compile(r"(?i)connection[_-]?string[=:]\s*\S{10,}", "Connection string assignment", PatternCategory::Secret));
+        v.push(compile(
+            r"(?i)(?:mongodb|mysql|postgres(?:ql)?|redis|sqlite)://[^@\s]+:[^@\s]+@[^\s]+",
+            "Database connection string",
+            PatternCategory::Secret,
+        ));
+        v.push(compile(
+            r"(?i)connection[_-]?string[=:]\s*\S{10,}",
+            "Connection string assignment",
+            PatternCategory::Secret,
+        ));
 
         // ── Secrets: Stripe / Payment ────────────────────────────────────
-        v.push(compile(r"(?:sk|pk)_(?:live|test)_[a-zA-Z0-9]{24,}", "Stripe key", PatternCategory::Secret));
+        v.push(compile(
+            r"(?:sk|pk)_(?:live|test)_[a-zA-Z0-9]{24,}",
+            "Stripe key",
+            PatternCategory::Secret,
+        ));
 
         // ── Secrets: Bearer tokens (standalone) ──────────────────────────
-        v.push(compile(r"(?i)bearer\s+([a-zA-Z0-9._\-+/=]{20,})", "Bearer token", PatternCategory::Secret));
+        v.push(compile(
+            r"(?i)bearer\s+([a-zA-Z0-9._\-+/=]{20,})",
+            "Bearer token",
+            PatternCategory::Secret,
+        ));
 
         // ── PII: Email addresses ────────────────────────────────────────
-        v.push(compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", "Email address", PatternCategory::Pii));
+        v.push(compile(
+            r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+            "Email address",
+            PatternCategory::Pii,
+        ));
 
         // ── PII: Phone numbers (US + international variants) ────────────
         // Require at least one separator (dash, dot, space, or parens) to avoid
@@ -230,14 +302,30 @@ impl SecretRedactor {
         ));
 
         // ── PII: SSN (US) ───────────────────────────────────────────────
-        v.push(compile(r"\b\d{3}-\d{2}-\d{4}\b", "SSN", PatternCategory::Pii));
+        v.push(compile(
+            r"\b\d{3}-\d{2}-\d{4}\b",
+            "SSN",
+            PatternCategory::Pii,
+        ));
 
         // ── PII: Credit card numbers ────────────────────────────────────
-        v.push(compile(r"\b(?:\d[ -]*?){13,16}\b", "Credit card number", PatternCategory::Pii));
+        v.push(compile(
+            r"\b(?:\d[ -]*?){13,16}\b",
+            "Credit card number",
+            PatternCategory::Pii,
+        ));
 
         // ── PII: IPv4 & IPv6 addresses ──────────────────────────────────
-        v.push(compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "IPv4 address", PatternCategory::Pii));
-        v.push(compile(r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b", "IPv6 address", PatternCategory::Pii));
+        v.push(compile(
+            r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+            "IPv4 address",
+            PatternCategory::Pii,
+        ));
+        v.push(compile(
+            r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b",
+            "IPv6 address",
+            PatternCategory::Pii,
+        ));
 
         // ── PII: Long numeric sequences (potential account numbers) ─────
         // 16+ digits to avoid false positives on order #s, serial #s, etc.
@@ -404,7 +492,10 @@ mod tests {
         let r = SecretRedactor::secrets_only();
         let input = format!("OPENAI_KEY={}", FAKE_OPENAI);
         let redacted = r.redact(&input);
-        assert!(!redacted.contains("sk-test"), "key should be redacted, got: {redacted}");
+        assert!(
+            !redacted.contains("sk-test"),
+            "key should be redacted, got: {redacted}"
+        );
         assert!(redacted.contains("[REDACTED:OpenAI API key]"));
     }
 
@@ -474,7 +565,10 @@ mod tests {
     fn redact_db_connection_string() {
         let r = SecretRedactor::secrets_only();
         let redacted = r.redact(FAKE_DSN);
-        assert!(!redacted.contains("secretpass"), "password should be redacted");
+        assert!(
+            !redacted.contains("secretpass"),
+            "password should be redacted"
+        );
         assert!(redacted.contains("[REDACTED:Database connection string]"));
     }
 
@@ -642,14 +736,20 @@ mod tests {
     fn secrets_only_skips_pii() {
         let r = SecretRedactor::secrets_only();
         let redacted = r.redact(FAKE_EMAIL);
-        assert_eq!(redacted, FAKE_EMAIL, "PII should pass through in secrets_only mode");
+        assert_eq!(
+            redacted, FAKE_EMAIL,
+            "PII should pass through in secrets_only mode"
+        );
     }
 
     #[test]
     fn pii_only_skips_secrets() {
         let r = SecretRedactor::pii_only();
         let redacted = r.redact(FAKE_OPENAI);
-        assert_eq!(redacted, FAKE_OPENAI, "secrets should pass through in pii_only mode");
+        assert_eq!(
+            redacted, FAKE_OPENAI,
+            "secrets should pass through in pii_only mode"
+        );
     }
 
     #[test]
@@ -689,7 +789,10 @@ mod tests {
         assert!(!s.contains("@"));
         assert!(s.contains("[REDACTED:"));
         assert!(s.contains("bob"), "non-PII values should be preserved");
-        assert!(s.contains("safe"), "non-PII array values should be preserved");
+        assert!(
+            s.contains("safe"),
+            "non-PII array values should be preserved"
+        );
     }
 
     #[test]

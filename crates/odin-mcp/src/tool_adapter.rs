@@ -83,16 +83,16 @@ impl McpToolAdapter {
     fn convert_schema(def: &McpToolDef) -> ToolSchema {
         // Use the inputSchema directly as the parameters, or fall back
         // to an empty object schema.
-        let parameters = if def.input_schema.is_null() || def.input_schema == serde_json::Value::Null
-        {
-            serde_json::json!({
-                "type": "object",
-                "properties": {},
-                "required": []
-            })
-        } else {
-            def.input_schema.clone()
-        };
+        let parameters =
+            if def.input_schema.is_null() || def.input_schema == serde_json::Value::Null {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                })
+            } else {
+                def.input_schema.clone()
+            };
 
         ToolSchema {
             schema_type: "function".into(),
@@ -210,10 +210,10 @@ fn map_mcp_error(tool_name: &str, err: McpError) -> OdinError {
         McpError::InvalidResponse(msg) => {
             OdinError::tool(tool_name, format!("Invalid response: {msg}"))
         }
-        McpError::AlreadyInitialized => {
-            OdinError::tool(tool_name, "Server already initialized")
+        McpError::AlreadyInitialized => OdinError::tool(tool_name, "Server already initialized"),
+        McpError::NotInitialized => {
+            OdinError::tool(tool_name, "Server not initialized".to_string())
         }
-        McpError::NotInitialized => OdinError::tool(tool_name, "Server not initialized".to_string()),
     }
 }
 
@@ -314,11 +314,9 @@ mod tests {
         // (the execute method needs one, but name/desc don't)
         let adapter = McpToolAdapter::new_with_tags(
             def,
-            Arc::new(Mutex::new(McpClient::new(
-                Arc::new(Mutex::new(MockTransport::new(
-                    std::collections::HashMap::new(),
-                ))),
-            ))),
+            Arc::new(Mutex::new(McpClient::new(Arc::new(Mutex::new(
+                MockTransport::new(std::collections::HashMap::new()),
+            ))))),
             vec!["mcp".into(), "custom".into()],
         );
 
@@ -336,26 +334,34 @@ mod tests {
 
         let adapter = McpToolAdapter::new_with_tags(
             def,
-            Arc::new(Mutex::new(McpClient::new(
-                Arc::new(Mutex::new(MockTransport::new(
-                    std::collections::HashMap::new(),
-                ))),
-            ))),
+            Arc::new(Mutex::new(McpClient::new(Arc::new(Mutex::new(
+                MockTransport::new(std::collections::HashMap::new()),
+            ))))),
             vec![],
         );
 
         // Object args should be valid
-        assert!(adapter.validate_args(&serde_json::json!({"key": "value"})).is_ok());
+        assert!(
+            adapter
+                .validate_args(&serde_json::json!({"key": "value"}))
+                .is_ok()
+        );
 
         // Null args should be valid (some MCP tools accept no args)
         assert!(adapter.validate_args(&serde_json::Value::Null).is_ok());
 
         // Non-object args should fail
-        assert!(adapter
-            .validate_args(&serde_json::json!("string_arg"))
-            .is_err());
+        assert!(
+            adapter
+                .validate_args(&serde_json::json!("string_arg"))
+                .is_err()
+        );
         assert!(adapter.validate_args(&serde_json::json!(42)).is_err());
-        assert!(adapter.validate_args(&serde_json::json!([1, 2, 3])).is_err());
+        assert!(
+            adapter
+                .validate_args(&serde_json::json!([1, 2, 3]))
+                .is_err()
+        );
     }
 
     #[test]
@@ -368,11 +374,9 @@ mod tests {
 
         let adapter = McpToolAdapter::new(
             def,
-            Arc::new(Mutex::new(McpClient::new(
-                Arc::new(Mutex::new(MockTransport::new(
-                    std::collections::HashMap::new(),
-                ))),
-            ))),
+            Arc::new(Mutex::new(McpClient::new(Arc::new(Mutex::new(
+                MockTransport::new(std::collections::HashMap::new()),
+            ))))),
         );
 
         // Default safety
@@ -389,11 +393,12 @@ mod tests {
             input_schema: serde_json::json!({"type": "object", "properties": {}}),
         };
 
-        let adapter = McpToolAdapter::new(def, Arc::new(Mutex::new(McpClient::new(
-            Arc::new(Mutex::new(MockTransport::new(
-                std::collections::HashMap::new(),
-            ))),
-        ))))
+        let adapter = McpToolAdapter::new(
+            def,
+            Arc::new(Mutex::new(McpClient::new(Arc::new(Mutex::new(
+                MockTransport::new(std::collections::HashMap::new()),
+            ))))),
+        )
         .with_approval(true)
         .with_safety(false);
 

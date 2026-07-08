@@ -41,25 +41,46 @@ async fn test_ws_messages_received_in_order() {
 
     // Verify they arrive in order (broadcast is FIFO per receiver)
     let received1 = rx.recv().await.expect("receive first message");
-    assert_eq!(received1.msg_type, "task_submit", "first message should be task_submit");
     assert_eq!(
-        received1.payload.as_ref().and_then(|p| p.get("goal")).and_then(|v| v.as_str()),
+        received1.msg_type, "task_submit",
+        "first message should be task_submit"
+    );
+    assert_eq!(
+        received1
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("goal"))
+            .and_then(|v| v.as_str()),
         Some("Write unit tests for the scheduler"),
         "task_submit payload should contain goal"
     );
 
     let received2 = rx.recv().await.expect("receive second message");
-    assert_eq!(received2.msg_type, "task_progress", "second message should be task_progress");
     assert_eq!(
-        received2.payload.as_ref().and_then(|p| p.get("iteration")).and_then(|v| v.as_u64()),
+        received2.msg_type, "task_progress",
+        "second message should be task_progress"
+    );
+    assert_eq!(
+        received2
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("iteration"))
+            .and_then(|v| v.as_u64()),
         Some(3),
         "task_progress should have iteration 3"
     );
 
     let received3 = rx.recv().await.expect("receive third message");
-    assert_eq!(received3.msg_type, "task_complete", "third message should be task_complete");
     assert_eq!(
-        received3.payload.as_ref().and_then(|p| p.get("success")).and_then(|v| v.as_bool()),
+        received3.msg_type, "task_complete",
+        "third message should be task_complete"
+    );
+    assert_eq!(
+        received3
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("success"))
+            .and_then(|v| v.as_bool()),
         Some(true),
         "task_complete should indicate success"
     );
@@ -108,7 +129,11 @@ async fn test_ws_message_serde_round_trip() {
 
     assert_eq!(deserialized.msg_type, "task_submit");
     assert_eq!(
-        deserialized.payload.as_ref().and_then(|p| p.get("goal")).and_then(|v| v.as_str()),
+        deserialized
+            .payload
+            .as_ref()
+            .and_then(|p| p.get("goal"))
+            .and_then(|v| v.as_str()),
         Some("Refactor the auth module")
     );
     assert_eq!(deserialized.correlation_id, Some("corr-42".into()));

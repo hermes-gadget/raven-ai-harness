@@ -151,7 +151,9 @@ impl FileLockManager {
 
         for path in &paths {
             if let Some(mut entry) = self.locks.get_mut(path) {
-                let had_write = entry.iter().any(|l| l.mode == LockMode::Write && l.agent_id == agent_id);
+                let had_write = entry
+                    .iter()
+                    .any(|l| l.mode == LockMode::Write && l.agent_id == agent_id);
                 entry.retain(|l| l.agent_id != agent_id);
 
                 if entry.is_empty() {
@@ -247,10 +249,7 @@ impl FileLockManager {
 
     /// Get the queue length for a file.
     pub fn queue_length(&self, path: &str) -> usize {
-        self.write_queue
-            .get(path)
-            .map(|q| q.len())
-            .unwrap_or(0)
+        self.write_queue.get(path).map(|q| q.len()).unwrap_or(0)
     }
 
     /// List all currently locked files.

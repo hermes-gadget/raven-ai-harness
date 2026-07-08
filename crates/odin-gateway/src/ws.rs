@@ -32,7 +32,7 @@ use futures::{SinkExt, StreamExt};
 use odin_core::error::OdinResult;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use tracing;
 
 // ── Configuration ─────────────────────────────────────────────────────
@@ -100,12 +100,7 @@ impl WsMessage {
     }
 
     /// Create a progress message.
-    pub fn task_progress(
-        task_id: &str,
-        iteration: u32,
-        confidence: f64,
-        phase: &str,
-    ) -> Self {
+    pub fn task_progress(task_id: &str, iteration: u32, confidence: f64, phase: &str) -> Self {
         Self {
             msg_type: "task_progress".into(),
             payload: Some(serde_json::json!({
@@ -245,7 +240,8 @@ impl WsConnectionManager {
 
     /// Get the number of connected clients.
     pub fn connection_count(&self) -> usize {
-        self.connection_count.load(std::sync::atomic::Ordering::Relaxed)
+        self.connection_count
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Check if at connection limit.
@@ -282,7 +278,10 @@ async fn handle_ws_connection(socket: WebSocket, conn_mgr: Arc<WsConnectionManag
     // Register for broadcasts
     let mut broadcast_rx = conn_mgr.register();
 
-    tracing::info!("[WS] Client connected: {conn_id} (total: {})", conn_mgr.connection_count());
+    tracing::info!(
+        "[WS] Client connected: {conn_id} (total: {})",
+        conn_mgr.connection_count()
+    );
 
     // Send a welcome message
     let welcome = WsMessage {
@@ -393,7 +392,10 @@ async fn handle_ws_connection(socket: WebSocket, conn_mgr: Arc<WsConnectionManag
     // Cleanup
     send_task.abort();
     conn_mgr.unregister();
-    tracing::info!("[WS] Client disconnected: {conn_id} (total: {})", conn_mgr.connection_count());
+    tracing::info!(
+        "[WS] Client disconnected: {conn_id} (total: {})",
+        conn_mgr.connection_count()
+    );
 }
 
 // ── Gateway (compatibility wrapper) ───────────────────────────────────

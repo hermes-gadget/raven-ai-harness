@@ -66,9 +66,7 @@ async fn run_gh(
     } else {
         let exit_code = output.status.code().unwrap_or(-1);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Some(format!(
-            "gh command failed (exit {exit_code}): {stderr}"
-        ))
+        Some(format!("gh command failed (exit {exit_code}): {stderr}"))
     };
 
     Ok(ToolResult {
@@ -83,7 +81,12 @@ async fn run_gh(
 }
 
 /// Build `gh issue create` arguments from parsed input.
-fn build_issue_create_args(repo: &str, title: &str, body: Option<&str>, labels: Option<&str>) -> Vec<String> {
+fn build_issue_create_args(
+    repo: &str,
+    title: &str,
+    body: Option<&str>,
+    labels: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "issue".into(),
         "create".into(),
@@ -306,11 +309,12 @@ impl Tool for GithubIssueCreate {
         args: serde_json::Value,
         _context: &ToolContext,
     ) -> OdinResult<ToolResult> {
-        let parsed: IssueCreateArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
-            tool: self.name.clone(),
-            message: format!("Invalid arguments: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+        let parsed: IssueCreateArgs =
+            serde_json::from_value(args).map_err(|e| OdinError::Tool {
+                tool: self.name.clone(),
+                message: format!("Invalid arguments: {e}"),
+                source: Some(Box::new(e)),
+            })?;
 
         let gh_args = build_issue_create_args(
             &parsed.repo,
@@ -355,7 +359,9 @@ impl GithubIssueSearch {
     pub fn new() -> Self {
         Self {
             name: "github_issue_search".into(),
-            description: "Search GitHub issues in a repository. Supports state filtering and text search.".into(),
+            description:
+                "Search GitHub issues in a repository. Supports state filtering and text search."
+                    .into(),
         }
     }
 
@@ -436,11 +442,12 @@ impl Tool for GithubIssueSearch {
         args: serde_json::Value,
         _context: &ToolContext,
     ) -> OdinResult<ToolResult> {
-        let parsed: IssueSearchArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
-            tool: self.name.clone(),
-            message: format!("Invalid arguments: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+        let parsed: IssueSearchArgs =
+            serde_json::from_value(args).map_err(|e| OdinError::Tool {
+                tool: self.name.clone(),
+                message: format!("Invalid arguments: {e}"),
+                source: Some(Box::new(e)),
+            })?;
 
         let gh_args = build_issue_search_args(
             &parsed.repo,
@@ -486,7 +493,9 @@ impl GithubPrCreate {
     pub fn new() -> Self {
         Self {
             name: "github_pr_create".into(),
-            description: "Create a GitHub pull request. Requires 'gh' CLI to be installed and authenticated.".into(),
+            description:
+                "Create a GitHub pull request. Requires 'gh' CLI to be installed and authenticated."
+                    .into(),
         }
     }
 
@@ -610,7 +619,8 @@ impl GithubPrStatus {
     pub fn new() -> Self {
         Self {
             name: "github_pr_status".into(),
-            description: "View a specific pull request or list all open PRs in a repository.".into(),
+            description: "View a specific pull request or list all open PRs in a repository."
+                .into(),
         }
     }
 
@@ -619,7 +629,8 @@ impl GithubPrStatus {
             schema_type: "function".into(),
             function: FunctionSchema {
                 name: name.into(),
-                description: "View details of a specific PR or list open PRs for a repository.".into(),
+                description: "View details of a specific PR or list open PRs for a repository."
+                    .into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -715,7 +726,8 @@ impl GithubActionsStatus {
     pub fn new() -> Self {
         Self {
             name: "github_actions_status".into(),
-            description: "Check the status of GitHub Actions workflow runs for a repository.".into(),
+            description: "Check the status of GitHub Actions workflow runs for a repository."
+                .into(),
         }
     }
 
@@ -786,11 +798,12 @@ impl Tool for GithubActionsStatus {
         args: serde_json::Value,
         _context: &ToolContext,
     ) -> OdinResult<ToolResult> {
-        let parsed: ActionsStatusArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
-            tool: self.name.clone(),
-            message: format!("Invalid arguments: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+        let parsed: ActionsStatusArgs =
+            serde_json::from_value(args).map_err(|e| OdinError::Tool {
+                tool: self.name.clone(),
+                message: format!("Invalid arguments: {e}"),
+                source: Some(Box::new(e)),
+            })?;
 
         let gh_args = build_actions_status_args(&parsed.repo, parsed.workflow.as_deref());
 
@@ -823,10 +836,38 @@ mod tests {
         assert_eq!(tool.name(), "github_issue_create");
         let schema = tool.schema();
         let params = &schema.function.parameters;
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("repo"));
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("title"));
-        assert!(params.get("required").unwrap().as_array().unwrap().contains(&"repo".to_string().into()));
-        assert!(params.get("required").unwrap().as_array().unwrap().contains(&"title".to_string().into()));
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("repo")
+        );
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("title")
+        );
+        assert!(
+            params
+                .get("required")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .contains(&"repo".to_string().into())
+        );
+        assert!(
+            params
+                .get("required")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .contains(&"title".to_string().into())
+        );
     }
 
     #[test]
@@ -835,7 +876,10 @@ mod tests {
         assert!(tool.is_dangerous());
         assert!(tool.requires_approval());
         assert!(!tool.is_safe());
-        assert_eq!(tool.capability_tags(), &["github", "issue", "write", "dangerous"]);
+        assert_eq!(
+            tool.capability_tags(),
+            &["github", "issue", "write", "dangerous"]
+        );
     }
 
     #[test]
@@ -844,9 +888,30 @@ mod tests {
         assert_eq!(tool.name(), "github_issue_search");
         let schema = tool.schema();
         let params = &schema.function.parameters;
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("repo"));
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("query"));
-        assert!(params.get("required").unwrap().as_array().unwrap().contains(&"repo".to_string().into()));
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("repo")
+        );
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("query")
+        );
+        assert!(
+            params
+                .get("required")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .contains(&"repo".to_string().into())
+        );
     }
 
     #[test]
@@ -864,10 +929,38 @@ mod tests {
         assert_eq!(tool.name(), "github_pr_create");
         let schema = tool.schema();
         let params = &schema.function.parameters;
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("repo"));
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("title"));
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("head"));
-        assert!(params.get("required").unwrap().as_array().unwrap().contains(&"head".to_string().into()));
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("repo")
+        );
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("title")
+        );
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("head")
+        );
+        assert!(
+            params
+                .get("required")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .contains(&"head".to_string().into())
+        );
     }
 
     #[test]
@@ -876,7 +969,10 @@ mod tests {
         assert!(tool.is_dangerous());
         assert!(tool.requires_approval());
         assert!(!tool.is_safe());
-        assert_eq!(tool.capability_tags(), &["github", "pr", "write", "dangerous"]);
+        assert_eq!(
+            tool.capability_tags(),
+            &["github", "pr", "write", "dangerous"]
+        );
     }
 
     #[test]
@@ -885,9 +981,30 @@ mod tests {
         assert_eq!(tool.name(), "github_pr_status");
         let schema = tool.schema();
         let params = &schema.function.parameters;
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("repo"));
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("pr_number"));
-        assert!(params.get("required").unwrap().as_array().unwrap().contains(&"repo".to_string().into()));
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("repo")
+        );
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("pr_number")
+        );
+        assert!(
+            params
+                .get("required")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .contains(&"repo".to_string().into())
+        );
     }
 
     #[test]
@@ -905,9 +1022,30 @@ mod tests {
         assert_eq!(tool.name(), "github_actions_status");
         let schema = tool.schema();
         let params = &schema.function.parameters;
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("repo"));
-        assert!(params.get("properties").unwrap().as_object().unwrap().contains_key("workflow"));
-        assert!(params.get("required").unwrap().as_array().unwrap().contains(&"repo".to_string().into()));
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("repo")
+        );
+        assert!(
+            params
+                .get("properties")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("workflow")
+        );
+        assert!(
+            params
+                .get("required")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .contains(&"repo".to_string().into())
+        );
     }
 
     #[test]
@@ -1023,14 +1161,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_gh_cli_available() {
-        let output = Command::new("gh")
-            .arg("--version")
-            .output()
-            .await;
+        let output = Command::new("gh").arg("--version").output().await;
         match output {
             Ok(out) if out.status.success() => {
                 let ver = String::from_utf8_lossy(&out.stdout);
-                assert!(ver.contains("gh") || ver.contains("GitHub"), "output: {ver}");
+                assert!(
+                    ver.contains("gh") || ver.contains("GitHub"),
+                    "output: {ver}"
+                );
             }
             _ => {
                 eprintln!("gh CLI not installed — skipping integration tests");
@@ -1052,9 +1190,19 @@ mod tests {
         if let Ok(res) = result {
             // If gh is not installed, we might get a failure
             if !res.success {
-                assert!(res.error.as_ref().unwrap_or(&String::new()).contains("gh") ||
-                        res.error.as_ref().unwrap_or(&String::new()).contains("not found") ||
-                        res.error.as_ref().unwrap_or(&String::new()).contains("Authentication"));
+                assert!(
+                    res.error.as_ref().unwrap_or(&String::new()).contains("gh")
+                        || res
+                            .error
+                            .as_ref()
+                            .unwrap_or(&String::new())
+                            .contains("not found")
+                        || res
+                            .error
+                            .as_ref()
+                            .unwrap_or(&String::new())
+                            .contains("Authentication")
+                );
             }
         }
     }

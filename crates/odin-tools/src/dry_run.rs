@@ -221,10 +221,7 @@ mod tests {
         // A dangerous command (rm -rf) — should still work in dry-run
         // because dry-run only validates schema, not the command itself
         let result = dry_run
-            .execute(
-                serde_json::json!({"command": "rm -rf /tmp/test"}),
-                &ctx,
-            )
+            .execute(serde_json::json!({"command": "rm -rf /tmp/test"}), &ctx)
             .await
             .unwrap();
 
@@ -274,10 +271,7 @@ mod tests {
             env: HashMap::new(),
         };
 
-        let result = dry_run
-            .execute(serde_json::json!({}), &ctx)
-            .await
-            .unwrap();
+        let result = dry_run.execute(serde_json::json!({}), &ctx).await.unwrap();
 
         assert!(result.success);
         assert_eq!(result.output, "custom mock output");

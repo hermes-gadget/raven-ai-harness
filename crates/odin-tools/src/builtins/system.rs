@@ -91,16 +91,20 @@ impl Tool for SystemInfo {
             .arg("-a")
             .output()
             .await
-            .map_err(|e| OdinError::Io(e))?;
+            .map_err(OdinError::Io)?;
 
         let free_output = tokio::process::Command::new("free")
             .arg("-h")
             .output()
             .await
-            .map_err(|e| OdinError::Io(e))?;
+            .map_err(OdinError::Io)?;
 
-        let sysname = String::from_utf8_lossy(&uname_output.stdout).trim().to_string();
-        let memory = String::from_utf8_lossy(&free_output.stdout).trim().to_string();
+        let sysname = String::from_utf8_lossy(&uname_output.stdout)
+            .trim()
+            .to_string();
+        let memory = String::from_utf8_lossy(&free_output.stdout)
+            .trim()
+            .to_string();
 
         let output = format!(
             "── System Information ──\n\
@@ -219,7 +223,7 @@ impl Tool for DiskUsage {
             cmd.arg(path);
         }
 
-        let output = cmd.output().await.map_err(|e| OdinError::Io(e))?;
+        let output = cmd.output().await.map_err(OdinError::Io)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -274,7 +278,8 @@ mod tests {
     #[tokio::test]
     async fn test_system_info_basic() {
         let tool = SystemInfo::new();
-        let result = tool.execute(serde_json::json!({}), &test_context())
+        let result = tool
+            .execute(serde_json::json!({}), &test_context())
             .await
             .unwrap();
         assert!(result.success);
@@ -287,7 +292,8 @@ mod tests {
     #[tokio::test]
     async fn test_system_info_empty_args() {
         let tool = SystemInfo::new();
-        let result = tool.execute(serde_json::Value::Null, &test_context())
+        let result = tool
+            .execute(serde_json::Value::Null, &test_context())
             .await
             .unwrap();
         assert!(result.success);
@@ -297,7 +303,8 @@ mod tests {
     #[tokio::test]
     async fn test_disk_usage_basic() {
         let tool = DiskUsage::new();
-        let result = tool.execute(serde_json::json!({}), &test_context())
+        let result = tool
+            .execute(serde_json::json!({}), &test_context())
             .await
             .unwrap();
         assert!(result.success);
@@ -308,7 +315,8 @@ mod tests {
     #[tokio::test]
     async fn test_disk_usage_with_path() {
         let tool = DiskUsage::new();
-        let result = tool.execute(serde_json::json!({"path": "/"}), &test_context())
+        let result = tool
+            .execute(serde_json::json!({"path": "/"}), &test_context())
             .await
             .unwrap();
         assert!(result.success);
@@ -318,12 +326,13 @@ mod tests {
     #[tokio::test]
     async fn test_disk_usage_invalid_path() {
         let tool = DiskUsage::new();
-        let result = tool.execute(
-            serde_json::json!({"path": "/nonexistent_path_xyz_123"}),
-            &test_context(),
-        )
-        .await
-        .unwrap();
+        let result = tool
+            .execute(
+                serde_json::json!({"path": "/nonexistent_path_xyz_123"}),
+                &test_context(),
+            )
+            .await
+            .unwrap();
         // df will return non-zero exit code for invalid paths
         assert!(!result.success || result.output.contains("nonexistent"));
     }

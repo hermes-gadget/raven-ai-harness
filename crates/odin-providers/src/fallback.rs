@@ -6,8 +6,8 @@
 //! and re-enables them after a cooldown period.
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -181,10 +181,7 @@ impl FallbackProvider {
                     60,
                 ))),
             );
-            health_status.insert(
-                f_name.clone(),
-                Arc::new(Mutex::new(HealthStatus::Unknown)),
-            );
+            health_status.insert(f_name.clone(), Arc::new(Mutex::new(HealthStatus::Unknown)));
         }
 
         let inner = Arc::new(FallbackInner {
@@ -209,7 +206,12 @@ impl FallbackProvider {
         if self
             .inner
             .health_check_started
-            .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
             .is_err()
         {
             // Already started
@@ -271,7 +273,8 @@ impl FallbackProvider {
         let mut tried_names: Vec<String> = Vec::new();
 
         // Build the ordered list: primary + fallbacks
-        let mut chain: Vec<(&str, &Arc<dyn Provider>)> = Vec::with_capacity(1 + self.inner.fallbacks.len());
+        let mut chain: Vec<(&str, &Arc<dyn Provider>)> =
+            Vec::with_capacity(1 + self.inner.fallbacks.len());
         chain.push((&self.inner.primary.0, &self.inner.primary.1));
         for (name, provider) in &self.inner.fallbacks {
             chain.push((name.as_str(), provider));
@@ -324,11 +327,7 @@ impl FallbackProvider {
                     return Ok((name.to_string(), response));
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "[FALLBACK] Provider '{}' failed: {}",
-                        name,
-                        e
-                    );
+                    tracing::warn!("[FALLBACK] Provider '{}' failed: {}", name, e);
                     // Record failure in circuit breaker
                     if let Some(cb) = self.inner.circuit_breakers.get(name) {
                         let mut state = cb.lock().await;
@@ -337,7 +336,10 @@ impl FallbackProvider {
                             let status = self.inner.health_status.get(name);
                             if let Some(s) = status {
                                 *s.lock().await = HealthStatus::Unhealthy {
-                                    reason: format!("Circuit breaker opened after {} failures", state.failure_count),
+                                    reason: format!(
+                                        "Circuit breaker opened after {} failures",
+                                        state.failure_count
+                                    ),
                                 };
                             }
                             tracing::warn!(
@@ -358,7 +360,9 @@ impl FallbackProvider {
             message: format!(
                 "All providers in fallback chain failed. Tried: [{}]. Last error: {}",
                 tried_names.join(", "),
-                last_error.as_ref().map_or("none".to_string(), |e| e.to_string())
+                last_error
+                    .as_ref()
+                    .map_or("none".to_string(), |e| e.to_string())
             ),
             source: last_error.map(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
         })
@@ -375,7 +379,8 @@ impl FallbackProvider {
         let mut last_error: Option<OdinError> = None;
         let mut tried_names: Vec<String> = Vec::new();
 
-        let mut chain: Vec<(&str, &Arc<dyn Provider>)> = Vec::with_capacity(1 + self.inner.fallbacks.len());
+        let mut chain: Vec<(&str, &Arc<dyn Provider>)> =
+            Vec::with_capacity(1 + self.inner.fallbacks.len());
         chain.push((&self.inner.primary.0, &self.inner.primary.1));
         for (name, provider) in &self.inner.fallbacks {
             chain.push((name.as_str(), provider));
@@ -417,7 +422,9 @@ impl FallbackProvider {
             message: format!(
                 "All providers in fallback chain failed. Tried: [{}]. Last error: {}",
                 tried_names.join(", "),
-                last_error.as_ref().map_or("none".to_string(), |e| e.to_string())
+                last_error
+                    .as_ref()
+                    .map_or("none".to_string(), |e| e.to_string())
             ),
             source: last_error.map(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>),
         })
@@ -501,7 +508,9 @@ impl Provider for FallbackProvider {
         options: &CompletionOptions,
     ) -> OdinResult<Box<dyn ChatStream>> {
         self.ensure_health_checks();
-        let stream = self.try_stream_providers(model, messages, tools, options).await?;
+        let stream = self
+            .try_stream_providers(model, messages, tools, options)
+            .await?;
         Ok(stream)
     }
 
@@ -529,8 +538,8 @@ impl Provider for FallbackProvider {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
     use tokio::sync::Mutex as TokioMutex;
 
     // ── Mock Provider Helpers ───────────────────────────────────────
@@ -635,8 +644,14 @@ mod tests {
     /// Primary succeeds → returns primary result
     #[tokio::test]
     async fn test_primary_succeeds() {
-        let primary = Arc::new(MockProvider::new_ok("primary", make_response("primary result")));
-        let fallback = Arc::new(MockProvider::new_ok("fallback", make_response("fallback result")));
+        let primary = Arc::new(MockProvider::new_ok(
+            "primary",
+            make_response("primary result"),
+        ));
+        let fallback = Arc::new(MockProvider::new_ok(
+            "fallback",
+            make_response("fallback result"),
+        ));
 
         let fp = FallbackProvider::new(
             "test-chain",
@@ -647,7 +662,9 @@ mod tests {
             0, // health checks disabled
         );
 
-        let result = fp.chat("test-model", &[], &[], &CompletionOptions::default()).await;
+        let result = fp
+            .chat("test-model", &[], &[], &CompletionOptions::default())
+            .await;
         assert!(result.is_ok());
         let text = result.unwrap().message.text().unwrap_or("").to_string();
         assert_eq!(text, "primary result");
@@ -661,11 +678,11 @@ mod tests {
     /// Primary fails → fallback succeeds
     #[tokio::test]
     async fn test_fallback_on_failure() {
-        let primary = Arc::new(MockProvider::new_err(
-            "primary",
-            "connection refused",
+        let primary = Arc::new(MockProvider::new_err("primary", "connection refused"));
+        let fallback = Arc::new(MockProvider::new_ok(
+            "fallback",
+            make_response("fallback result"),
         ));
-        let fallback = Arc::new(MockProvider::new_ok("fallback", make_response("fallback result")));
 
         let fp = FallbackProvider::new(
             "test-chain",
@@ -676,7 +693,9 @@ mod tests {
             0,
         );
 
-        let result = fp.chat("test-model", &[], &[], &CompletionOptions::default()).await;
+        let result = fp
+            .chat("test-model", &[], &[], &CompletionOptions::default())
+            .await;
         assert!(result.is_ok());
         let text = result.unwrap().message.text().unwrap_or("").to_string();
         assert_eq!(text, "fallback result");
@@ -689,14 +708,8 @@ mod tests {
     /// All fail → error with chain info
     #[tokio::test]
     async fn test_all_fail() {
-        let primary = Arc::new(MockProvider::new_err(
-            "primary",
-            "timeout",
-        ));
-        let fallback = Arc::new(MockProvider::new_err(
-            "fallback",
-            "fallback also failed",
-        ));
+        let primary = Arc::new(MockProvider::new_err("primary", "timeout"));
+        let fallback = Arc::new(MockProvider::new_err("fallback", "fallback also failed"));
 
         let fp = FallbackProvider::new(
             "test-chain",
@@ -707,7 +720,9 @@ mod tests {
             0,
         );
 
-        let result = fp.chat("test-model", &[], &[], &CompletionOptions::default()).await;
+        let result = fp
+            .chat("test-model", &[], &[], &CompletionOptions::default())
+            .await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("All providers in fallback chain failed"));
@@ -721,33 +736,32 @@ mod tests {
     /// Circuit breaker: N failures → skips for cooldown → re-enables after cooldown
     #[tokio::test]
     async fn test_circuit_breaker_opens_and_retries() {
-        let primary = Arc::new(MockProvider::new_err(
-            "primary",
-            "server error",
+        let primary = Arc::new(MockProvider::new_err("primary", "server error"));
+        let fallback = Arc::new(MockProvider::new_ok(
+            "fallback",
+            make_response("fallback result"),
         ));
-        let fallback = Arc::new(MockProvider::new_ok("fallback", make_response("fallback result")));
 
         let fp = FallbackProvider::new(
             "test-chain",
             "primary",
             primary.clone(),
             vec![("fallback".into(), fallback.clone())],
-            2,   // open after 2 failures
-            0,   // no health checks
+            2, // open after 2 failures
+            0, // no health checks
         );
 
         // First call: primary fails (1), fallback succeeds
-        let r1 = fp.chat("test-model", &[], &[], &CompletionOptions::default()).await;
+        let r1 = fp
+            .chat("test-model", &[], &[], &CompletionOptions::default())
+            .await;
         assert!(r1.is_ok());
         assert_eq!(r1.unwrap().message.text().unwrap_or(""), "fallback result");
         assert_eq!(primary.call_count(), 1);
         assert_eq!(fallback.call_count(), 1);
 
         // Change fallback to also fail for second call
-        let _fallback_err = Arc::new(MockProvider::new_err(
-            "fallback",
-            "fail 1b",
-        ));
+        let _fallback_err = Arc::new(MockProvider::new_err("fallback", "fail 1b"));
 
         // Use a new fallback provider that fails (need to test circuit breaker behaviour properly)
         // Actually, let's re-test more directly by checking the circuit breaker state
@@ -760,24 +774,28 @@ mod tests {
         }
 
         // Second call: primary fails again (now at 2), fallback should still be tried
-        let primary2 = Arc::new(MockProvider::new_err(
-            "primary",
-            "fail 2",
-        ));
+        let primary2 = Arc::new(MockProvider::new_err("primary", "fail 2"));
 
         let fp2 = FallbackProvider::new(
             "test-chain-2",
             "primary",
             primary2.clone(),
-            vec![("fallback".into(), Arc::new(MockProvider::new_ok("fallback", make_response("fb2"))))],
+            vec![(
+                "fallback".into(),
+                Arc::new(MockProvider::new_ok("fallback", make_response("fb2"))),
+            )],
             2,
             0,
         );
 
         // 1st failure
-        let _ = fp2.chat("model", &[], &[], &CompletionOptions::default()).await;
+        let _ = fp2
+            .chat("model", &[], &[], &CompletionOptions::default())
+            .await;
         // 2nd failure → circuit should open
-        let r2 = fp2.chat("model", &[], &[], &CompletionOptions::default()).await;
+        let r2 = fp2
+            .chat("model", &[], &[], &CompletionOptions::default())
+            .await;
         assert!(r2.is_ok());
 
         // Check circuit is open
@@ -790,7 +808,9 @@ mod tests {
         assert_eq!(primary2.call_count(), 2); // only 2 attempts, 3rd call skipped primary
 
         // Now verify the third call would skip primary (circuit open)
-        let r3 = fp2.chat("model", &[], &[], &CompletionOptions::default()).await;
+        let r3 = fp2
+            .chat("model", &[], &[], &CompletionOptions::default())
+            .await;
         assert!(r3.is_ok());
         // primary call count should still be 2 (skipped on 3rd call)
         assert_eq!(primary2.call_count(), 2);

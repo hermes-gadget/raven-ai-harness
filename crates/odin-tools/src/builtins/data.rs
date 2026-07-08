@@ -158,20 +158,20 @@ impl Tool for JsonExtract {
     ) -> OdinResult<ToolResult> {
         let start = Instant::now();
 
-        let parsed: JsonExtractArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
-            tool: self.name.clone(),
-            message: format!("Invalid arguments: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+        let parsed: JsonExtractArgs =
+            serde_json::from_value(args).map_err(|e| OdinError::Tool {
+                tool: self.name.clone(),
+                message: format!("Invalid arguments: {e}"),
+                source: Some(Box::new(e)),
+            })?;
 
         // Parse the input JSON
-        let json_value: serde_json::Value = serde_json::from_str(&parsed.input).map_err(|e| {
-            OdinError::Tool {
+        let json_value: serde_json::Value =
+            serde_json::from_str(&parsed.input).map_err(|e| OdinError::Tool {
                 tool: self.name.clone(),
                 message: format!("Invalid JSON input: {e}"),
                 source: Some(Box::new(e)),
-            }
-        })?;
+            })?;
 
         // Split query into segments
         let parts: Vec<&str> = parsed.query.split('.').collect();

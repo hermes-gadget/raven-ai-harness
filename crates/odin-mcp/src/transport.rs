@@ -17,11 +17,8 @@ use tokio::sync::Mutex;
 #[async_trait]
 pub trait McpTransport: Send + Sync {
     /// Send a JSON-RPC request and await the response.
-    async fn send_request(
-        &self,
-        method: &str,
-        params: Option<Value>,
-    ) -> McpResult<JsonRpcResponse>;
+    async fn send_request(&self, method: &str, params: Option<Value>)
+    -> McpResult<JsonRpcResponse>;
 
     /// Close the transport.
     async fn close(&mut self) -> McpResult<()>;
@@ -143,8 +140,7 @@ impl McpTransport for StdioTransport {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
         let request = JsonRpcRequest::new(id, method, params);
 
-        let request_str =
-            serde_json::to_string(&request).map_err(McpError::Serialization)?;
+        let request_str = serde_json::to_string(&request).map_err(McpError::Serialization)?;
 
         {
             let mut stdin_guard = self.stdin.lock().await;
@@ -180,12 +176,11 @@ impl McpTransport for StdioTransport {
 impl Drop for StdioTransport {
     fn drop(&mut self) {
         // Best-effort cleanup in synchronous context
-        if let Ok(mut child_guard) = self.child.try_lock() {
-            if let Some(mut child) = child_guard.take() {
+        if let Ok(mut child_guard) = self.child.try_lock()
+            && let Some(mut child) = child_guard.take() {
                 let _ = child.kill();
                 let _ = child.wait();
             }
-        }
     }
 }
 
@@ -219,10 +214,7 @@ impl MockTransport {
 
     /// Get the list of requests that were sent through this transport.
     pub fn sent_requests(&self) -> Vec<(String, Option<Value>)> {
-        self.sent_requests
-            .lock()
-            .unwrap()
-            .clone()
+        self.sent_requests.lock().unwrap().clone()
     }
 }
 

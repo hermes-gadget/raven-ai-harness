@@ -165,13 +165,14 @@ impl OrchestrationStore for SqliteOrchestrationStore {
     }
 
     async fn load_task_graph(&self, root_id: &str) -> Result<TaskGraph, StoreError> {
-        let row = sqlx::query_as::<_, (String,)>(
-            "SELECT graph_json FROM task_graphs WHERE root_id = ?",
-        )
-        .bind(root_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or_else(|| StoreError::NotFound(format!("Task graph '{}' not found", root_id)))?;
+        let row =
+            sqlx::query_as::<_, (String,)>("SELECT graph_json FROM task_graphs WHERE root_id = ?")
+                .bind(root_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| {
+                    StoreError::NotFound(format!("Task graph '{}' not found", root_id))
+                })?;
 
         let graph: TaskGraph = serde_json::from_str(&row.0)?;
         Ok(graph)
@@ -235,9 +236,7 @@ impl OrchestrationStore for SqliteOrchestrationStore {
         .bind(agent_id.to_string())
         .fetch_optional(&self.pool)
         .await?
-        .ok_or_else(|| {
-            StoreError::NotFound(format!("Agent lifecycle '{}' not found", agent_id))
-        })?;
+        .ok_or_else(|| StoreError::NotFound(format!("Agent lifecycle '{}' not found", agent_id)))?;
 
         let lifecycle: AgentLifecycle = serde_json::from_str(&row.0)?;
         Ok(lifecycle)

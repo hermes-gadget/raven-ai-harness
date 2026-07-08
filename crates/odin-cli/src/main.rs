@@ -388,7 +388,8 @@ async fn cmd_run(
     );
 
     // Create the provider via the factory
-    let provider: Arc<dyn odin_core::traits::Provider> = odin_providers::create_provider(&provider_cfg)?;
+    let provider: Arc<dyn odin_core::traits::Provider> =
+        odin_providers::create_provider(&provider_cfg)?;
 
     // Create the policy engine from safety config
     let policy_engine = Arc::new(odin_permissions::PolicyEngine::new(
@@ -643,7 +644,10 @@ async fn run_orchestrated(
     let groups = composer.detect_workstreams(graph);
 
     // Extract all node data before mutating composer
-    let mut node_tasks: Vec<(usize, Vec<(uuid::Uuid, String, String, Vec<String>, Vec<String>, u32)>)> = Vec::new();
+    let mut node_tasks: Vec<(
+        usize,
+        Vec<(uuid::Uuid, String, String, Vec<String>, Vec<String>, u32)>,
+    )> = Vec::new();
     for (group_idx, group) in groups.iter().enumerate() {
         let mut tasks = Vec::new();
         for &node_id in group {
@@ -663,7 +667,11 @@ async fn run_orchestrated(
     let mut agent_handles = Vec::new();
 
     for (group_idx, tasks) in &node_tasks {
-        println!("🔄 Group {}: {} agent(s) dispatch...", group_idx + 1, tasks.len());
+        println!(
+            "🔄 Group {}: {} agent(s) dispatch...",
+            group_idx + 1,
+            tasks.len()
+        );
 
         for (node_id, label, goal, read_files, write_files, priority) in tasks {
             // Create sub-agent config
@@ -720,7 +728,10 @@ async fn run_orchestrated(
     }
 
     println!();
-    println!("⏳ Waiting for {} sub-agent(s) to complete...", agent_handles.len());
+    println!(
+        "⏳ Waiting for {} sub-agent(s) to complete...",
+        agent_handles.len()
+    );
 
     let mut total_success = 0;
     let mut total_fail = 0;
@@ -733,7 +744,11 @@ async fn run_orchestrated(
                         "  {} {} — {} ({}ms, {} iters)",
                         if task_result.success { "✅" } else { "⚠️" },
                         label,
-                        if task_result.success { "success" } else { "failed" },
+                        if task_result.success {
+                            "success"
+                        } else {
+                            "failed"
+                        },
                         elapsed.as_millis(),
                         task_result.iterations,
                     );
@@ -779,7 +794,11 @@ async fn run_orchestrated(
     println!("╠══════════════════════════════════════════╣");
     println!(
         "║  Status:  {:32} ║",
-        if total_fail == 0 { "✓ ALL COMPLETED" } else { "✗ PARTIAL FAILURE" }
+        if total_fail == 0 {
+            "✓ ALL COMPLETED"
+        } else {
+            "✗ PARTIAL FAILURE"
+        }
     );
     println!(
         "║  Success: {}/{} agents passed           ║",
@@ -833,7 +852,10 @@ async fn cmd_orchestrate(action: OrchestrateAction) -> anyhow::Result<()> {
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize orchestration store: {e}"))?;
-            store.initialize().await.map_err(|e| anyhow::anyhow!("Store init: {e}"))?;
+            store
+                .initialize()
+                .await
+                .map_err(|e| anyhow::anyhow!("Store init: {e}"))?;
 
             let mut composer = Composer::default();
             composer.intake(&goal);
@@ -889,7 +911,9 @@ async fn cmd_orchestrate(action: OrchestrateAction) -> anyhow::Result<()> {
         OrchestrateAction::Status => {
             let store = odin_orchestrator::persistence::SqliteOrchestrationStore::new(
                 dirs_state_path("orchestration.db"),
-            ).await.map_err(|e| anyhow::anyhow!("Store: {e}"))?;
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Store: {e}"))?;
             store.initialize().await.ok();
 
             let graphs = store.list_task_graphs().await.unwrap_or_default();
@@ -898,20 +922,27 @@ async fn cmd_orchestrate(action: OrchestrateAction) -> anyhow::Result<()> {
             println!("📊 Orchestration Status");
             println!("   Stored task graphs: {}", graphs.len());
             for g in &graphs {
-                println!("     - '{}' ({} nodes, {})", g.root_goal, g.node_count, g.status);
+                println!(
+                    "     - '{}' ({} nodes, {})",
+                    g.root_goal, g.node_count, g.status
+                );
             }
             println!("   Stored agent lifecycles: {}", lifecycles.len());
             for lc in &lifecycles {
                 println!("     - {} ({})", lc.agent_id, lc.phase);
             }
             if graphs.is_empty() && lifecycles.is_empty() {
-                println!("   No stored orchestration state. Use 'odin orchestrate submit' to start a run.");
+                println!(
+                    "   No stored orchestration state. Use 'odin orchestrate submit' to start a run."
+                );
             }
         }
         OrchestrateAction::Inspect { id } => {
             let store = odin_orchestrator::persistence::SqliteOrchestrationStore::new(
                 dirs_state_path("orchestration.db"),
-            ).await.map_err(|e| anyhow::anyhow!("Store: {e}"))?;
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Store: {e}"))?;
             store.initialize().await.ok();
 
             // Try to load as a graph by root goal
@@ -930,8 +961,8 @@ async fn cmd_orchestrate(action: OrchestrateAction) -> anyhow::Result<()> {
             }
 
             // Try to load as an agent lifecycle
-            if let Ok(run_id) = uuid::Uuid::parse_str(&id) {
-                if let Ok(lc) = store.load_agent_lifecycle(run_id).await {
+            if let Ok(run_id) = uuid::Uuid::parse_str(&id)
+                && let Ok(lc) = store.load_agent_lifecycle(run_id).await {
                     println!("🔍 Agent Lifecycle: {}", lc.agent_id);
                     println!("   Phase: {:?}", lc.phase);
                     println!("   Created: {}", lc.created_at);
@@ -944,14 +975,18 @@ async fn cmd_orchestrate(action: OrchestrateAction) -> anyhow::Result<()> {
                     println!("   History: {} transition(s)", lc.history.len());
                     return Ok(());
                 }
-            }
 
-            println!("🔍 Not found: '{}' — no task graph or agent lifecycle with that ID.", id);
+            println!(
+                "🔍 Not found: '{}' — no task graph or agent lifecycle with that ID.",
+                id
+            );
             println!("   Use 'odin orchestrate status' to list stored items.");
         }
         OrchestrateAction::Cancel { id } => {
             println!("🛑 Cancel requested for task: {}", id);
-            println!("   (Task cancellation requires active runtime — CLI orchestration is stateless)");
+            println!(
+                "   (Task cancellation requires active runtime — CLI orchestration is stateless)"
+            );
         }
         OrchestrateAction::Pause => {
             println!("⏸️  Pause all sub-agents");
@@ -1358,7 +1393,10 @@ async fn cmd_schedule(action: ScheduleAction) -> anyhow::Result<()> {
 }
 
 /// `odin providers list` — List configured providers.
-async fn cmd_providers(action: ProvidersAction, config_path: Option<PathBuf>) -> anyhow::Result<()> {
+async fn cmd_providers(
+    action: ProvidersAction,
+    config_path: Option<PathBuf>,
+) -> anyhow::Result<()> {
     match action {
         ProvidersAction::List => {
             let config = load_config(config_path.as_deref())?;
@@ -1645,8 +1683,8 @@ async fn cmd_tasks(action: TasksAction) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("Invalid task ID '{id}': {e}"))?;
 
             for line in contents.lines() {
-                if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line) {
-                    if entry.id == target_id {
+                if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line)
+                    && entry.id == target_id {
                         println!("Task: {}", entry.id);
                         println!("  Event:    {}", entry.event_type);
                         println!("  Action:   {}", entry.action);
@@ -1654,10 +1692,12 @@ async fn cmd_tasks(action: TasksAction) -> anyhow::Result<()> {
                         println!("  Session:  {}", entry.session_id);
                         println!("  Time:     {}", entry.timestamp.to_rfc3339());
                         println!("  Result:   {:?}", entry.result);
-                        println!("  Details:  {}", serde_json::to_string_pretty(&entry.details)?);
+                        println!(
+                            "  Details:  {}",
+                            serde_json::to_string_pretty(&entry.details)?
+                        );
                         return Ok(());
                     }
-                }
             }
 
             println!("Task '{id}' not found in audit log.");
@@ -1683,15 +1723,14 @@ async fn cmd_sessions(action: SessionsAction) -> anyhow::Result<()> {
             let contents = std::fs::read_to_string(path)
                 .map_err(|e| anyhow::anyhow!("Failed to read audit log: {e}"))?;
 
-            let mut sessions: std::collections::BTreeMap<uuid::Uuid, Vec<odin_core::types::AuditEntry>> =
-                std::collections::BTreeMap::new();
+            let mut sessions: std::collections::BTreeMap<
+                uuid::Uuid,
+                Vec<odin_core::types::AuditEntry>,
+            > = std::collections::BTreeMap::new();
 
             for line in contents.lines() {
                 if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line) {
-                    sessions
-                        .entry(entry.session_id)
-                        .or_default()
-                        .push(entry);
+                    sessions.entry(entry.session_id).or_default().push(entry);
                 }
             }
 
@@ -1713,9 +1752,9 @@ async fn cmd_sessions(action: SessionsAction) -> anyhow::Result<()> {
                 if let Some(ref ts) = last_ts {
                     println!("    Last:    {ts}");
                 }
-                let has_error = entries.iter().any(|e| {
-                    e.result == odin_core::types::AuditResult::Failure
-                });
+                let has_error = entries
+                    .iter()
+                    .any(|e| e.result == odin_core::types::AuditResult::Failure);
                 if has_error {
                     println!("    Status:  ⚠ has failures");
                 } else {
@@ -1742,11 +1781,10 @@ async fn cmd_sessions(action: SessionsAction) -> anyhow::Result<()> {
 
             let mut entries = Vec::new();
             for line in contents.lines() {
-                if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line) {
-                    if entry.session_id == session_id {
+                if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line)
+                    && entry.session_id == session_id {
                         entries.push(entry);
                     }
-                }
             }
 
             if entries.is_empty() {
@@ -1792,7 +1830,8 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                     .into_iter()
                     .filter(|t| {
                         let tt = t.capability_tags();
-                        tag.iter().all(|filter_tag| tt.contains(&filter_tag.as_str()))
+                        tag.iter()
+                            .all(|filter_tag| tt.contains(&filter_tag.as_str()))
                     })
                     .collect()
             };
@@ -1812,7 +1851,11 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
             };
 
             println!("╔══════════════════════════════════════════╗");
-            println!("║         Registered Tools ({:>2}){:>12} ║", tools.len(), filter_note);
+            println!(
+                "║         Registered Tools ({:>2}){:>12} ║",
+                tools.len(),
+                filter_note
+            );
             println!("╠══════════════════════════════════════════╣");
 
             let mut sorted = tools.clone();
@@ -1825,9 +1868,7 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                 } else {
                     name.to_string()
                 };
-                println!(
-                    "║ {dangerous} {truncated:<30} ║",
-                );
+                println!("║ {dangerous} {truncated:<30} ║",);
             }
             println!("╚══════════════════════════════════════════╝");
         }
@@ -1846,8 +1887,7 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                     println!("  Schema:");
                     println!(
                         "    {}",
-                        serde_json::to_string_pretty(&schema)
-                            .unwrap_or_else(|_| "{}".into())
+                        serde_json::to_string_pretty(&schema).unwrap_or_else(|_| "{}".into())
                     );
                 }
                 None => {
@@ -1856,7 +1896,8 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                     println!("Available tools:");
                     let registry = build_tool_registry();
                     let tools = registry.all_tools();
-                    let mut names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+                    let mut names: Vec<String> =
+                        tools.iter().map(|t| t.name().to_string()).collect();
                     names.sort();
                     for n in &names {
                         println!("  - {n}");
@@ -1900,7 +1941,11 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        ToolsAction::Test { name, args, dry_run } => {
+        ToolsAction::Test {
+            name,
+            args,
+            dry_run,
+        } => {
             let registry = build_tool_registry();
             match registry.get(&name) {
                 Some(tool) => {
@@ -1924,7 +1969,14 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                         match dry_tool.execute(json_args, &context).await {
                             Ok(result) => {
                                 let elapsed = start.elapsed();
-                                println!("  Status:   {}", if result.success { "✓ PASS" } else { "✗ FAIL" });
+                                println!(
+                                    "  Status:   {}",
+                                    if result.success {
+                                        "✓ PASS"
+                                    } else {
+                                        "✗ FAIL"
+                                    }
+                                );
                                 println!("  Duration: {:.3}s", elapsed.as_secs_f64());
                                 println!("  Output:   {}", result.output);
                                 if let Some(ref err) = result.error {
@@ -1952,7 +2004,14 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                         match tool.execute(json_args, &context).await {
                             Ok(result) => {
                                 let elapsed = start.elapsed();
-                                println!("  Status:   {}", if result.success { "✓ PASS" } else { "✗ FAIL" });
+                                println!(
+                                    "  Status:   {}",
+                                    if result.success {
+                                        "✓ PASS"
+                                    } else {
+                                        "✗ FAIL"
+                                    }
+                                );
                                 println!("  Duration: {:.3}s", elapsed.as_secs_f64());
                                 println!("  Output:   {}", result.output);
                                 if let Some(ref err) = result.error {
@@ -1981,7 +2040,11 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                 report.summary.passed, report.summary.failed, report.summary.warnings
             );
             for tc in &report.tool_checks {
-                let icon = if tc.checks.iter().any(|c| c.status == odin_tools::DoctorCheckStatus::Fail) {
+                let icon = if tc
+                    .checks
+                    .iter()
+                    .any(|c| c.status == odin_tools::DoctorCheckStatus::Fail)
+                {
                     "✗"
                 } else {
                     "✓"
@@ -2033,11 +2096,7 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                                 continue;
                             }
 
-                            println!(
-                                "\n── {} ── {}",
-                                cat_name,
-                                group.description
-                            );
+                            println!("\n── {} ── {}", cat_name, group.description);
                             for entry in &tools {
                                 print_tool_entry(entry);
                             }
@@ -2077,7 +2136,11 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
             println!("║ Tool                    Score   Calls   Rate    Unreliable  ║");
             println!("╠══════════════════════════════════════════════════════════════╣");
             for s in &scores {
-                let status = if s.is_unreliable { "⚠ YES " } else { "  no  " };
+                let status = if s.is_unreliable {
+                    "⚠ YES "
+                } else {
+                    "  no  "
+                };
                 let name = &s.tool_name;
                 let display_name = if name.len() > 22 {
                     format!("{}…", &name[..21])
@@ -2086,11 +2149,7 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                 };
                 println!(
                     "║ {:<22}  {:.3}  {:>5}  {:.3}  {}      ║",
-                    display_name,
-                    s.score,
-                    s.total_calls,
-                    s.success_rate,
-                    status
+                    display_name, s.score, s.total_calls, s.success_rate, status
                 );
             }
             println!("╚══════════════════════════════════════════════════════════════╝");
@@ -2123,11 +2182,10 @@ async fn cmd_audit(action: AuditAction) -> anyhow::Result<()> {
 
             let mut entries = Vec::new();
             for line in contents.lines() {
-                if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line) {
-                    if entry.id == target_id || entry.session_id == target_id {
+                if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line)
+                    && (entry.id == target_id || entry.session_id == target_id) {
                         entries.push(entry);
                     }
-                }
             }
 
             if entries.is_empty() {
@@ -2189,14 +2247,8 @@ fn cmd_status() -> anyhow::Result<()> {
         if cfg!(debug_assertions) { "yes" } else { "no" }
     );
     println!("║  Log Level:  {:30} ║", "info");
-    println!(
-        "║  Providers:  {:30} ║",
-        config.models.providers.len()
-    );
-    println!(
-        "║  Skills Dir: {:30} ║",
-        config.agent.skills_dir
-    );
+    println!("║  Providers:  {:30} ║", config.models.providers.len());
+    println!("║  Skills Dir: {:30} ║", config.agent.skills_dir);
     println!("╚══════════════════════════════════════════╝");
 
     Ok(())
@@ -2227,10 +2279,7 @@ fn build_tool_registry() -> odin_tools::ToolRegistry {
         registry,
         Box::new(odin_tools::builtins::shell::Shell::new())
     );
-    try_reg!(
-        registry,
-        Box::new(odin_tools::builtins::git::Git::new())
-    );
+    try_reg!(registry, Box::new(odin_tools::builtins::git::Git::new()));
     try_reg!(
         registry,
         Box::new(odin_tools::builtins::web::WebFetch::new())
@@ -2257,10 +2306,7 @@ fn build_tool_registry() -> odin_tools::ToolRegistry {
     );
 
     // Utility tools (10 new tools — Phase 4.0 expansion)
-    try_reg!(
-        registry,
-        Box::new(odin_tools::builtins::utility::FileList)
-    );
+    try_reg!(registry, Box::new(odin_tools::builtins::utility::FileList));
     try_reg!(
         registry,
         Box::new(odin_tools::builtins::utility::FileDelete)
@@ -2269,14 +2315,8 @@ fn build_tool_registry() -> odin_tools::ToolRegistry {
         registry,
         Box::new(odin_tools::builtins::utility::FileExists)
     );
-    try_reg!(
-        registry,
-        Box::new(odin_tools::builtins::utility::EnvVar)
-    );
-    try_reg!(
-        registry,
-        Box::new(odin_tools::builtins::utility::TimeNow)
-    );
+    try_reg!(registry, Box::new(odin_tools::builtins::utility::EnvVar));
+    try_reg!(registry, Box::new(odin_tools::builtins::utility::TimeNow));
     try_reg!(
         registry,
         Box::new(odin_tools::builtins::utility::RandomNumber)

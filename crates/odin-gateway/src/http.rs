@@ -222,8 +222,12 @@ async fn metrics_handler(
     state: Arc<GatewayState>,
     start_time: Arc<std::time::Instant>,
 ) -> Json<MetricsResponse> {
-    let tool_calls = state.total_tool_calls.load(std::sync::atomic::Ordering::Acquire);
-    let tool_errors = state.total_tool_errors.load(std::sync::atomic::Ordering::Acquire);
+    let tool_calls = state
+        .total_tool_calls
+        .load(std::sync::atomic::Ordering::Acquire);
+    let tool_errors = state
+        .total_tool_errors
+        .load(std::sync::atomic::Ordering::Acquire);
     let error_rate = if tool_calls > 0 {
         tool_errors as f64 / tool_calls as f64
     } else {
@@ -232,8 +236,12 @@ async fn metrics_handler(
 
     Json(MetricsResponse {
         uptime_secs: start_time.elapsed().as_secs(),
-        active_tasks: state.active_tasks.load(std::sync::atomic::Ordering::Acquire),
-        total_requests: state.total_requests.load(std::sync::atomic::Ordering::Acquire),
+        active_tasks: state
+            .active_tasks
+            .load(std::sync::atomic::Ordering::Acquire),
+        total_requests: state
+            .total_requests
+            .load(std::sync::atomic::Ordering::Acquire),
         total_tool_calls: tool_calls,
         total_tool_errors: tool_errors,
         tool_count: build_tool_registry(None).all_tools().len(),
@@ -322,16 +330,28 @@ fn build_tool_registry(config: Option<&ToolsConfig>) -> odin_tools::ToolRegistry
         );
     }
     if tool_enabled("shell") {
-        try_reg!(registry, Box::new(odin_tools::builtins::shell::Shell::new()));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::shell::Shell::new())
+        );
     }
     if tool_enabled("web_fetch") {
-        try_reg!(registry, Box::new(odin_tools::builtins::web::WebFetch::new()));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::web::WebFetch::new())
+        );
     }
     if tool_enabled("web_search") {
-        try_reg!(registry, Box::new(odin_tools::builtins::web::WebSearch::new()));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::web::WebSearch::new())
+        );
     }
     if tool_enabled("http_request") {
-        try_reg!(registry, Box::new(odin_tools::builtins::web::HttpRequest::new()));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::web::HttpRequest::new())
+        );
     }
     if tool_enabled("git") {
         try_reg!(registry, Box::new(odin_tools::builtins::git::Git::new()));
@@ -359,10 +379,16 @@ fn build_tool_registry(config: Option<&ToolsConfig>) -> odin_tools::ToolRegistry
         try_reg!(registry, Box::new(odin_tools::builtins::utility::FileList));
     }
     if tool_enabled("file_delete") {
-        try_reg!(registry, Box::new(odin_tools::builtins::utility::FileDelete));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::utility::FileDelete)
+        );
     }
     if tool_enabled("file_exists") {
-        try_reg!(registry, Box::new(odin_tools::builtins::utility::FileExists));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::utility::FileExists)
+        );
     }
     if tool_enabled("env_var") {
         try_reg!(registry, Box::new(odin_tools::builtins::utility::EnvVar));
@@ -371,34 +397,64 @@ fn build_tool_registry(config: Option<&ToolsConfig>) -> odin_tools::ToolRegistry
         try_reg!(registry, Box::new(odin_tools::builtins::utility::TimeNow));
     }
     if tool_enabled("random_number") {
-        try_reg!(registry, Box::new(odin_tools::builtins::utility::RandomNumber));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::utility::RandomNumber)
+        );
     }
     if tool_enabled("json_validate") {
-        try_reg!(registry, Box::new(odin_tools::builtins::utility::JsonValidate));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::utility::JsonValidate)
+        );
     }
     if tool_enabled("text_search") {
-        try_reg!(registry, Box::new(odin_tools::builtins::utility::TextSearch));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::utility::TextSearch)
+        );
     }
     if tool_enabled("process_list") {
-        try_reg!(registry, Box::new(odin_tools::builtins::utility::ProcessList));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::utility::ProcessList)
+        );
     }
     if tool_enabled("network_ping") {
-        try_reg!(registry, Box::new(odin_tools::builtins::utility::NetworkPing));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::utility::NetworkPing)
+        );
     }
     if tool_enabled("github_issue_create") {
-        try_reg!(registry, Box::new(odin_tools::builtins::github::GithubIssueCreate::new()));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::github::GithubIssueCreate::new())
+        );
     }
     if tool_enabled("github_issue_search") {
-        try_reg!(registry, Box::new(odin_tools::builtins::github::GithubIssueSearch::new()));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::github::GithubIssueSearch::new())
+        );
     }
     if tool_enabled("github_pr_create") {
-        try_reg!(registry, Box::new(odin_tools::builtins::github::GithubPrCreate::new()));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::github::GithubPrCreate::new())
+        );
     }
     if tool_enabled("github_pr_status") {
-        try_reg!(registry, Box::new(odin_tools::builtins::github::GithubPrStatus::new()));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::github::GithubPrStatus::new())
+        );
     }
     if tool_enabled("github_actions_status") {
-        try_reg!(registry, Box::new(odin_tools::builtins::github::GithubActionsStatus::new()));
+        try_reg!(
+            registry,
+            Box::new(odin_tools::builtins::github::GithubActionsStatus::new())
+        );
     }
 
     registry
@@ -413,9 +469,7 @@ struct ToolsQuery {
     tags: Option<String>,
 }
 
-async fn tools_list_handler(
-    Query(query): Query<ToolsQuery>,
-) -> Json<ToolsListResponse> {
+async fn tools_list_handler(Query(query): Query<ToolsQuery>) -> Json<ToolsListResponse> {
     let registry = build_tool_registry(None);
     let schemas = registry.list_schemas();
 
@@ -462,9 +516,7 @@ async fn tools_list_handler(
 }
 
 /// GET /tools/:name — inspect one tool.
-async fn tool_inspect_handler(
-    Path(name): Path<String>,
-) -> impl IntoResponse {
+async fn tool_inspect_handler(Path(name): Path<String>) -> impl IntoResponse {
     let registry = build_tool_registry(None);
 
     match registry.get(&name) {
@@ -574,7 +626,7 @@ async fn graceful_shutdown_signal(state: Arc<GatewayState>) {
     // Wait for shutdown signal
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         let mut sigterm = signal(SignalKind::terminate()).ok();
         let mut sigint = signal(SignalKind::interrupt()).ok();
         tokio::select! {
@@ -599,7 +651,9 @@ async fn graceful_shutdown_signal(state: Arc<GatewayState>) {
     // Wait for active tasks to complete (with 30s timeout)
     let drain_start = std::time::Instant::now();
     loop {
-        let active = state.active_tasks.load(std::sync::atomic::Ordering::Acquire);
+        let active = state
+            .active_tasks
+            .load(std::sync::atomic::Ordering::Acquire);
         if active == 0 {
             break;
         }
@@ -685,7 +739,9 @@ async fn orchestrate_handler(
     state: axum::extract::State<Arc<GatewayState>>,
     Json(body): Json<OrchestrateRequest>,
 ) -> impl IntoResponse {
-    state.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state
+        .total_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     use odin_orchestrator::Composer;
 
@@ -710,8 +766,8 @@ async fn orchestrate_handler(
     let tasks: Vec<OrchestrateTaskInfo> = graph
         .nodes
         .values()
-        .enumerate()
-        .map(|(_i, node)| {
+        
+        .map(|node| {
             // Find which workstream group this node belongs to
             let ws_group = groups
                 .iter()
@@ -750,7 +806,9 @@ async fn orchestrate_status_handler(
     state: axum::extract::State<Arc<GatewayState>>,
     axum::extract::Path(run_id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    state.total_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state
+        .total_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     // In server mode, we'd look up the run from persistent state.
     // For now, return a placeholder status.
@@ -834,12 +892,7 @@ pub fn build_router(state: Arc<GatewayState>, start_time: Arc<std::time::Instant
             "/orchestrate/{id}/status",
             get({
                 let st = state.clone();
-                move |path| {
-                    orchestrate_status_handler(
-                        axum::extract::State(st.clone()),
-                        path,
-                    )
-                }
+                move |path| orchestrate_status_handler(axum::extract::State(st.clone()), path)
             }),
         )
         .layer(tower_http::trace::TraceLayer::new_for_http())

@@ -4,12 +4,12 @@
 //! file locking, conflict detection, and merge resolution.
 
 use odin_orchestrator::{
+    Composer,
     composer::ComposerConfig,
     file_lock::FileLockManager,
     lifecycle::AgentPhase,
     merge::{MergeStrategy, SubAgentResult},
     sub_agent::SubAgentConfigBuilder,
-    Composer,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -100,14 +100,32 @@ fn test_parallel_safe_execution() {
     assert!(composer.start_agent(id_c).is_ok());
 
     // Verify all are running
-    assert_eq!(composer.get_agent(&id_a).unwrap().0.phase, AgentPhase::Running);
-    assert_eq!(composer.get_agent(&id_b).unwrap().0.phase, AgentPhase::Running);
-    assert_eq!(composer.get_agent(&id_c).unwrap().0.phase, AgentPhase::Running);
+    assert_eq!(
+        composer.get_agent(&id_a).unwrap().0.phase,
+        AgentPhase::Running
+    );
+    assert_eq!(
+        composer.get_agent(&id_b).unwrap().0.phase,
+        AgentPhase::Running
+    );
+    assert_eq!(
+        composer.get_agent(&id_c).unwrap().0.phase,
+        AgentPhase::Running
+    );
 
     // Complete all
-    composer.complete_agent(id_a, make_result_with_id(id_a, "a", true, vec!["a.txt"], "A done"));
-    composer.complete_agent(id_b, make_result_with_id(id_b, "b", true, vec!["b.txt"], "B done"));
-    composer.complete_agent(id_c, make_result_with_id(id_c, "c", true, vec!["c.txt"], "C done"));
+    composer.complete_agent(
+        id_a,
+        make_result_with_id(id_a, "a", true, vec!["a.txt"], "A done"),
+    );
+    composer.complete_agent(
+        id_b,
+        make_result_with_id(id_b, "b", true, vec!["b.txt"], "B done"),
+    );
+    composer.complete_agent(
+        id_c,
+        make_result_with_id(id_c, "c", true, vec!["c.txt"], "C done"),
+    );
 
     // Collect and merge
     let results = composer.collect_results();
@@ -139,7 +157,10 @@ fn test_overlapping_file_edits_queued() {
     );
 
     // First agent gets the lock
-    assert!(composer.start_agent(id_a).is_ok(), "Agent A should get the write lock");
+    assert!(
+        composer.start_agent(id_a).is_ok(),
+        "Agent A should get the write lock"
+    );
     assert!(composer.file_locks().has_write_lock("shared.rs"));
 
     // Second agent is queued
@@ -206,8 +227,14 @@ fn test_concurrent_reads_write_blocks_reads() {
             .build(),
     );
 
-    assert!(composer.start_agent(reader_a).is_ok(), "Reader A should start");
-    assert!(composer.start_agent(reader_b).is_ok(), "Reader B should start (concurrent read)");
+    assert!(
+        composer.start_agent(reader_a).is_ok(),
+        "Reader A should start"
+    );
+    assert!(
+        composer.start_agent(reader_b).is_ok(),
+        "Reader B should start (concurrent read)"
+    );
 
     // Now a writer comes along
     let writer = composer.register_agent(
@@ -218,11 +245,20 @@ fn test_concurrent_reads_write_blocks_reads() {
 
     // Writer gets queued because readers hold read locks
     let result = composer.start_agent(writer);
-    assert!(result.is_err(), "Writer should be queued while readers hold locks");
+    assert!(
+        result.is_err(),
+        "Writer should be queued while readers hold locks"
+    );
 
     // After readers finish, writer should be able to proceed
-    composer.complete_agent(reader_a, make_result_with_id(reader_a, "reader-a", true, vec![], "read"));
-    composer.complete_agent(reader_b, make_result_with_id(reader_b, "reader-b", true, vec![], "read"));
+    composer.complete_agent(
+        reader_a,
+        make_result_with_id(reader_a, "reader-a", true, vec![], "read"),
+    );
+    composer.complete_agent(
+        reader_b,
+        make_result_with_id(reader_b, "reader-b", true, vec![], "read"),
+    );
 }
 
 // ── Test: Write Lock Queue Ordering ──────────────────────────────────
@@ -261,8 +297,14 @@ fn test_write_lock_queue_fifo() {
     assert_eq!(locks.queue_length(file), 2);
 
     // Release w1 (FIFO: w2 should get lock next)
-    composer.complete_agent(w1, make_result_with_id(w1, "w1", true, vec![file], "w1 done"));
-    assert!(locks.has_write_lock(file), "w2 or w3 should now hold the lock");
+    composer.complete_agent(
+        w1,
+        make_result_with_id(w1, "w1", true, vec![file], "w1 done"),
+    );
+    assert!(
+        locks.has_write_lock(file),
+        "w2 or w3 should now hold the lock"
+    );
     assert_eq!(locks.queue_length(file), 1, "Queue should be down to 1");
 }
 
@@ -287,7 +329,10 @@ fn test_cancellation_releases_locks() {
 
     let (_a, lc) = composer.get_agent(&agent).unwrap();
     assert_eq!(lc.phase, AgentPhase::Cancelled);
-    assert!(!composer.file_locks().has_write_lock(file), "Lock should be released on cancel");
+    assert!(
+        !composer.file_locks().has_write_lock(file),
+        "Lock should be released on cancel"
+    );
 }
 
 // ── Test: Conflicting Edits Detected ─────────────────────────────────
@@ -312,7 +357,10 @@ fn test_conflicting_edits_detected() {
     let _ = composer.start_agent(id_b); // queued — returns Err
 
     // Complete A first. The FileLockManager auto-grants the lock to B.
-    composer.complete_agent(id_a, make_result_with_id(id_a, "a", true, vec!["shared.rs"], "A's changes"));
+    composer.complete_agent(
+        id_a,
+        make_result_with_id(id_a, "a", true, vec!["shared.rs"], "A's changes"),
+    );
 
     // B now holds the write lock (auto-granted). Start it.
     // We need to transition B directly since the lock is already held.
@@ -320,7 +368,10 @@ fn test_conflicting_edits_detected() {
         agent.phase = AgentPhase::Running;
         lifecycle.start();
     }
-    composer.complete_agent(id_b, make_result_with_id(id_b, "b", true, vec!["shared.rs"], "B's changes"));
+    composer.complete_agent(
+        id_b,
+        make_result_with_id(id_b, "b", true, vec!["shared.rs"], "B's changes"),
+    );
 
     // Collect and merge — should detect that shared.rs was modified by both
     let results = composer.collect_results();
@@ -353,14 +404,26 @@ fn test_pause_and_resume_all() {
 
     // Pause all
     composer.pause_all();
-    assert_eq!(composer.get_agent(&id_a).unwrap().0.phase, AgentPhase::Blocked);
-    assert_eq!(composer.get_agent(&id_b).unwrap().0.phase, AgentPhase::Blocked);
+    assert_eq!(
+        composer.get_agent(&id_a).unwrap().0.phase,
+        AgentPhase::Blocked
+    );
+    assert_eq!(
+        composer.get_agent(&id_b).unwrap().0.phase,
+        AgentPhase::Blocked
+    );
 
     // Resume all
     let resumed = composer.resume_all().unwrap();
     assert_eq!(resumed, 2);
-    assert_eq!(composer.get_agent(&id_a).unwrap().0.phase, AgentPhase::Running);
-    assert_eq!(composer.get_agent(&id_b).unwrap().0.phase, AgentPhase::Running);
+    assert_eq!(
+        composer.get_agent(&id_a).unwrap().0.phase,
+        AgentPhase::Running
+    );
+    assert_eq!(
+        composer.get_agent(&id_b).unwrap().0.phase,
+        AgentPhase::Running
+    );
 }
 
 // ── Test: Reprioritize Mid-Execution ─────────────────────────────────
@@ -388,9 +451,7 @@ fn test_reprioritize_mid_execution() {
 fn test_failed_sub_agent_tracking() {
     let mut composer = Composer::default();
 
-    let id = composer.register_agent(
-        SubAgentConfigBuilder::new("flaky", "might fail").build(),
-    );
+    let id = composer.register_agent(SubAgentConfigBuilder::new("flaky", "might fail").build());
 
     composer.start_agent(id).unwrap();
     composer.fail_agent(id, "something broke");
@@ -507,9 +568,36 @@ fn test_final_answer_composition_from_multiple_agents() {
         composer.start_agent(id).unwrap();
     }
 
-    composer.complete_agent(id_a, make_result_with_id(id_a, "fix-cli", true, vec!["src/cli.rs"], "Fixed CLI parsing bug in arg parser"));
-    composer.complete_agent(id_b, make_result_with_id(id_b, "add-docs", true, vec!["README.md"], "Added installation and config docs"));
-    composer.complete_agent(id_c, make_result_with_id(id_c, "add-tests", true, vec!["tests/scheduler.rs"], "Added 5 scheduler integration tests"));
+    composer.complete_agent(
+        id_a,
+        make_result_with_id(
+            id_a,
+            "fix-cli",
+            true,
+            vec!["src/cli.rs"],
+            "Fixed CLI parsing bug in arg parser",
+        ),
+    );
+    composer.complete_agent(
+        id_b,
+        make_result_with_id(
+            id_b,
+            "add-docs",
+            true,
+            vec!["README.md"],
+            "Added installation and config docs",
+        ),
+    );
+    composer.complete_agent(
+        id_c,
+        make_result_with_id(
+            id_c,
+            "add-tests",
+            true,
+            vec!["tests/scheduler.rs"],
+            "Added 5 scheduler integration tests",
+        ),
+    );
 
     // Collect and compose final answer
     let results = composer.collect_results();
@@ -519,15 +607,28 @@ fn test_final_answer_composition_from_multiple_agents() {
     assert!(merged.success, "Merge should succeed");
 
     // Verify the composed answer references all work
-    assert!(merged.summary.contains("fix-cli"), "Summary should mention CLI fix");
-    assert!(merged.summary.contains("add-docs"), "Summary should mention docs");
-    assert!(merged.summary.contains("add-tests"), "Summary should mention tests");
+    assert!(
+        merged.summary.contains("fix-cli"),
+        "Summary should mention CLI fix"
+    );
+    assert!(
+        merged.summary.contains("add-docs"),
+        "Summary should mention docs"
+    );
+    assert!(
+        merged.summary.contains("add-tests"),
+        "Summary should mention tests"
+    );
 
     // All 3 files should be in the modified list
     assert_eq!(merged.modified_files.len(), 3);
     assert!(merged.modified_files.contains(&"src/cli.rs".to_string()));
     assert!(merged.modified_files.contains(&"README.md".to_string()));
-    assert!(merged.modified_files.contains(&"tests/scheduler.rs".to_string()));
+    assert!(
+        merged
+            .modified_files
+            .contains(&"tests/scheduler.rs".to_string())
+    );
 
     // No conflicts (different files)
     assert!(merged.conflicts.is_empty());
@@ -541,17 +642,16 @@ fn test_final_answer_composition_from_multiple_agents() {
 fn test_orchestration_with_one_failure() {
     let mut composer = Composer::default();
 
-    let good = composer.register_agent(
-        SubAgentConfigBuilder::new("good", "succeeds").build(),
-    );
-    let bad = composer.register_agent(
-        SubAgentConfigBuilder::new("bad", "fails").build(),
-    );
+    let good = composer.register_agent(SubAgentConfigBuilder::new("good", "succeeds").build());
+    let bad = composer.register_agent(SubAgentConfigBuilder::new("bad", "fails").build());
 
     composer.start_agent(good).unwrap();
     composer.start_agent(bad).unwrap();
 
-    composer.complete_agent(good, make_result_with_id(good, "good", true, vec!["good.txt"], "Good done"));
+    composer.complete_agent(
+        good,
+        make_result_with_id(good, "good", true, vec!["good.txt"], "Good done"),
+    );
     composer.fail_agent(bad, "something went wrong");
 
     let results = composer.collect_results();
@@ -559,5 +659,8 @@ fn test_orchestration_with_one_failure() {
 
     assert!(!merged.success, "Overall should fail when any agent fails");
     assert!(merged.summary.contains("❌"), "Summary should show failure");
-    assert!(merged.summary.contains("✅"), "Summary should also show success");
+    assert!(
+        merged.summary.contains("✅"),
+        "Summary should also show success"
+    );
 }

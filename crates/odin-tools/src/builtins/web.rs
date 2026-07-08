@@ -455,11 +455,12 @@ impl Tool for HttpRequest {
     ) -> OdinResult<ToolResult> {
         let start = Instant::now();
 
-        let parsed: HttpRequestArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
-            tool: self.name.clone(),
-            message: format!("Invalid arguments: {e}"),
-            source: Some(Box::new(e)),
-        })?;
+        let parsed: HttpRequestArgs =
+            serde_json::from_value(args).map_err(|e| OdinError::Tool {
+                tool: self.name.clone(),
+                message: format!("Invalid arguments: {e}"),
+                source: Some(Box::new(e)),
+            })?;
 
         // Validate URL
         if !parsed.url.starts_with("http://") && !parsed.url.starts_with("https://") {

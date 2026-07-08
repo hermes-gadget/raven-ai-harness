@@ -84,9 +84,8 @@ impl Scheduler {
     /// Returns the assigned job ID. If a store is configured, the job
     /// is persisted immediately.
     pub async fn add_job(&self, name: &str, schedule: &str, task: JobTask) -> OdinResult<JobId> {
-        let sched = Schedule::parse(schedule).map_err(|e| {
-            OdinError::Config(format!("Invalid schedule '{}': {}", schedule, e))
-        })?;
+        let sched = Schedule::parse(schedule)
+            .map_err(|e| OdinError::Config(format!("Invalid schedule '{}': {}", schedule, e)))?;
 
         let job = Job::new(name, sched.clone(), task);
         let id = job.id;
@@ -112,9 +111,8 @@ impl Scheduler {
         schedule: &str,
         config: SchedulerJobConfig,
     ) -> OdinResult<JobId> {
-        let sched = Schedule::parse(schedule).map_err(|e| {
-            OdinError::Config(format!("Invalid schedule '{}': {}", schedule, e))
-        })?;
+        let sched = Schedule::parse(schedule)
+            .map_err(|e| OdinError::Config(format!("Invalid schedule '{}': {}", schedule, e)))?;
 
         let mut job = Job::new(name, sched.clone(), crate::job::noop_task());
         job.task_goal = Some(config.task_goal);
@@ -272,9 +270,7 @@ impl Scheduler {
                         created_at: chrono::Utc::now(),
                     };
 
-                    let _ = runtime
-                        .submit_task(&task_id, &agent_task, None)
-                        .await;
+                    let _ = runtime.submit_task(&task_id, &agent_task, None).await;
 
                     // Decrement running count
                     let mut jobs_guard = jobs_clone.write().await;
@@ -456,9 +452,7 @@ impl Scheduler {
                                 created_at: chrono::Utc::now(),
                             };
 
-                            let _ = runtime
-                                .submit_task(&task_id, &agent_task, None)
-                                .await;
+                            let _ = runtime.submit_task(&task_id, &agent_task, None).await;
 
                             let mut jobs_guard = jobs_clone.write().await;
                             if let Some(active) = jobs_guard.get_mut(&job_id) {
@@ -633,7 +627,10 @@ mod tests {
         let sched = Scheduler::default().with_store(store.clone());
         let task: JobTask = Arc::new(|| Box::pin(async {}));
 
-        let id = sched.add_job("persist-test", "*/10 * * * *", task).await.unwrap();
+        let id = sched
+            .add_job("persist-test", "*/10 * * * *", task)
+            .await
+            .unwrap();
         let loaded = store.load_all_jobs().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "persist-test");
@@ -654,10 +651,7 @@ mod tests {
         let loaded = store.load_all_jobs().await.unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].name, "config-test");
-        assert_eq!(
-            loaded[0].task_goal.as_deref(),
-            Some("Run my task")
-        );
+        assert_eq!(loaded[0].task_goal.as_deref(), Some("Run my task"));
         assert_eq!(loaded[0].max_iterations, 50);
     }
 
@@ -733,7 +727,10 @@ mod tests {
             let store = Arc::new(SqliteSchedulerStore::new(&path_str).unwrap());
             let sched = Scheduler::default().with_store(store.clone());
             let task: JobTask = Arc::new(|| Box::pin(async {}));
-            let id = sched.add_job("restart-test", "*/5 * * * *", task).await.unwrap();
+            let id = sched
+                .add_job("restart-test", "*/5 * * * *", task)
+                .await
+                .unwrap();
             id
         };
 
@@ -778,10 +775,15 @@ mod tests {
 
         let task: JobTask = Arc::new(move || {
             let c = counter_clone.clone();
-            Box::pin(async move { c.fetch_add(1, Ordering::SeqCst); })
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+            })
         });
 
-        let id = sched.add_job("state-update", "* * * * *", task).await.unwrap();
+        let id = sched
+            .add_job("state-update", "* * * * *", task)
+            .await
+            .unwrap();
 
         // Set next_run to past
         {

@@ -85,7 +85,10 @@ pub fn create_provider_chain(
     let circuit_threshold = cfg.circuit_breaker_threshold;
 
     Ok(Arc::new(FallbackProvider::new(
-        format!("{}_chain", fallback_names.first().unwrap_or(&"fallback".into())),
+        format!(
+            "{}_chain",
+            fallback_names.first().unwrap_or(&"fallback".into())
+        ),
         primary_name,
         primary,
         fallbacks,

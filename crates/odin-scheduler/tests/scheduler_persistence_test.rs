@@ -42,7 +42,10 @@ async fn test_scheduler_persistence_survives_restart() {
 
     // ── "Restart": new store, same DB file ───────────────────────────
     let store2 = SqliteSchedulerStore::new(db_path_str).expect("second store creation");
-    let jobs2 = store2.load_all_jobs().await.expect("load all after restart");
+    let jobs2 = store2
+        .load_all_jobs()
+        .await
+        .expect("load all after restart");
 
     assert_eq!(jobs2.len(), 2, "should still have 2 jobs after restart");
     let names: Vec<&str> = jobs2.iter().map(|j| j.name.as_str()).collect();
@@ -83,7 +86,13 @@ async fn test_scheduler_enable_disable_persists_across_restart() {
 
     // Re-enable the job
     store2
-        .update_job_state(&job.id, true, jobs[0].last_run, jobs[0].next_run, jobs[0].run_count)
+        .update_job_state(
+            &job.id,
+            true,
+            jobs[0].last_run,
+            jobs[0].next_run,
+            jobs[0].run_count,
+        )
         .await
         .expect("re-enable job");
 
@@ -91,5 +100,8 @@ async fn test_scheduler_enable_disable_persists_across_restart() {
     let store3 = SqliteSchedulerStore::new(db_path_str).expect("store after re-enable");
     let jobs = store3.load_all_jobs().await.expect("load jobs");
     assert_eq!(jobs.len(), 1, "should still have 1 job");
-    assert!(jobs[0].enabled, "job should be enabled after re-enable and restart");
+    assert!(
+        jobs[0].enabled,
+        "job should be enabled after re-enable and restart"
+    );
 }

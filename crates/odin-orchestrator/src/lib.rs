@@ -27,4 +27,4 @@ pub use merge::{MergeResolver, MergeStrategy};
 pub use persistence::OrchestrationStore;
 pub use progress::{ProgressTracker, WorkstreamStatus};
 pub use sub_agent::{SubAgent, SubAgentConfig};
-pub use task_graph::{TaskGraph, TaskNode, TaskEdge};
+pub use task_graph::{TaskEdge, TaskGraph, TaskNode};

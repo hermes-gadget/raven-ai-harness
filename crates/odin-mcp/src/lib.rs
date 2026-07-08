@@ -118,10 +118,7 @@ pub mod config {
         }
 
         /// Create a new HTTP-based MCP server config.
-        pub fn new_http(
-            name: impl Into<String>,
-            url: impl Into<String>,
-        ) -> Self {
+        pub fn new_http(name: impl Into<String>, url: impl Into<String>) -> Self {
             Self {
                 name: name.into(),
                 command: String::new(),

@@ -92,11 +92,7 @@ impl MergeResolver {
     }
 
     /// Merge sub-agent results using the given strategy.
-    pub fn merge(
-        &self,
-        results: Vec<SubAgentResult>,
-        strategy: MergeStrategy,
-    ) -> MergedResult {
+    pub fn merge(&self, results: Vec<SubAgentResult>, strategy: MergeStrategy) -> MergedResult {
         let conflicts = self.detect_conflicts(&results);
 
         // Determine if we need user input
@@ -188,10 +184,7 @@ impl MergeResolver {
 
         let success_count = results.iter().filter(|r| r.success).count();
         let total = results.len();
-        let header = format!(
-            "## Results ({}/{})\n\n",
-            success_count, total
-        );
+        let header = format!("## Results ({}/{})\n\n", success_count, total);
 
         format!("{}{}", header, parts.join("\n\n"))
     }
@@ -217,11 +210,7 @@ impl MergeResolver {
     }
 
     /// Build a conflict summary.
-    fn conflict_summary(
-        &self,
-        results: &[SubAgentResult],
-        conflicts: &[FileConflict],
-    ) -> String {
+    fn conflict_summary(&self, results: &[SubAgentResult], conflicts: &[FileConflict]) -> String {
         let mut summary = String::from("⚠️ **Merge conflicts detected**\n\n");
 
         summary.push_str("### Conflicted files:\n");
@@ -242,7 +231,9 @@ impl MergeResolver {
             }
         }
 
-        summary.push_str("\n> Manual resolution required. Use `odin merge resolve` to handle conflicts.");
+        summary.push_str(
+            "\n> Manual resolution required. Use `odin merge resolve` to handle conflicts.",
+        );
         summary
     }
 }

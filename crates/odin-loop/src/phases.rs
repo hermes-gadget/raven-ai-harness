@@ -96,12 +96,10 @@ impl Phase for PlanPhase {
                 // Append to the first system message
                 if let Some(first) = state.messages.first_mut()
                     && first.role == Role::System
-                {
-                    if let MessageContent::Text { content } = &mut first.content {
+                    && let MessageContent::Text { content } = &mut first.content {
                         content.push_str("\n\n");
                         content.push_str(&skills_prompt);
                     }
-                }
             }
         }
 
@@ -372,7 +370,8 @@ impl Phase for ActPhase {
 
                                 let start = std::time::Instant::now();
                                 // Capture input summary before moving args into execute
-                                let input_summary: String = args.to_string().chars().take(200).collect();
+                                let input_summary: String =
+                                    args.to_string().chars().take(200).collect();
                                 let mut tr = match tool.execute(args, &tool_context).await {
                                     Ok(tr) => tr,
                                     Err(e) => ToolResult {
@@ -393,11 +392,8 @@ impl Phase for ActPhase {
 
                                 // Audit log the tool call
                                 if let Some(ref audit_logger) = context.audit_logger {
-                                    let permission_decision = if policy_denied {
-                                        "denied"
-                                    } else {
-                                        "allowed"
-                                    };
+                                    let permission_decision =
+                                        if policy_denied { "denied" } else { "allowed" };
                                     let details = serde_json::json!({
                                         "input_summary": input_summary,
                                         "result": if tr.success { "success" } else { "failure" },
@@ -412,7 +408,11 @@ impl Phase for ActPhase {
                                         event_type: AuditEventType::ToolCall,
                                         action: tool_name.clone(),
                                         details,
-                                        result: if tr.success { AuditResult::Success } else { AuditResult::Failure },
+                                        result: if tr.success {
+                                            AuditResult::Success
+                                        } else {
+                                            AuditResult::Failure
+                                        },
                                     };
                                     let _ = audit_logger.log(audit_entry).await;
                                 }

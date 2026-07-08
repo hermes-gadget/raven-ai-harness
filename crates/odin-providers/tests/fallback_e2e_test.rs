@@ -5,8 +5,8 @@
 //! 2. Circuit breaker opens after N consecutive failures
 //! 3. Once the circuit is open, the failing provider is skipped
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use odin_core::error::{OdinError, OdinResult};
@@ -48,10 +48,7 @@ impl Provider for FailingProvider {
         _options: &CompletionOptions,
     ) -> OdinResult<ChatResponse> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        Err(OdinError::provider(
-            &self.name,
-            "Intentional mock failure",
-        ))
+        Err(OdinError::provider(&self.name, "Intentional mock failure"))
     }
 
     async fn chat_stream(
@@ -62,10 +59,7 @@ impl Provider for FailingProvider {
         _options: &CompletionOptions,
     ) -> OdinResult<Box<dyn ChatStream>> {
         self.call_count.fetch_add(1, Ordering::SeqCst);
-        Err(OdinError::provider(
-            &self.name,
-            "Intentional mock failure",
-        ))
+        Err(OdinError::provider(&self.name, "Intentional mock failure"))
     }
 
     async fn health_check(&self) -> OdinResult<bool> {
@@ -164,7 +158,12 @@ async fn test_fallback_used_when_primary_fails() {
     let provider = make_fallback(primary, fallback, 3);
 
     let result = provider
-        .chat("gpt-4", &[Message::user("test")], &[], &CompletionOptions::default())
+        .chat(
+            "gpt-4",
+            &[Message::user("test")],
+            &[],
+            &CompletionOptions::default(),
+        )
         .await;
 
     assert!(
@@ -173,8 +172,16 @@ async fn test_fallback_used_when_primary_fails() {
     );
 
     // Primary was called once and failed; fallback was called once and succeeded
-    assert_eq!(primary_count.load(Ordering::SeqCst), 1, "primary should have been called once");
-    assert_eq!(fallback_count.load(Ordering::SeqCst), 1, "fallback should have been called once");
+    assert_eq!(
+        primary_count.load(Ordering::SeqCst),
+        1,
+        "primary should have been called once"
+    );
+    assert_eq!(
+        fallback_count.load(Ordering::SeqCst),
+        1,
+        "fallback should have been called once"
+    );
 }
 
 #[tokio::test]
@@ -202,7 +209,10 @@ async fn test_circuit_breaker_opens_after_n_failures() {
 
     // Third call: primary is circuit-open → primary skipped → fallback succeeds
     let r3 = provider.chat("gpt-4", msgs, &[], &opts).await;
-    assert!(r3.is_ok(), "call 3 should succeed (fallback, primary skipped)");
+    assert!(
+        r3.is_ok(),
+        "call 3 should succeed (fallback, primary skipped)"
+    );
 
     // Check circuit breaker states
     let states = provider.circuit_breaker_states();
@@ -213,13 +223,25 @@ async fn test_circuit_breaker_opens_after_n_failures() {
 
     // circuit_breaker_states returns HashMap<String, (u32, bool)>
     let (failure_count, circuit_open) = states.get("primary").copied().unwrap_or_default();
-    assert_eq!(failure_count, threshold, "primary should have {} failures", threshold);
+    assert_eq!(
+        failure_count, threshold,
+        "primary should have {} failures",
+        threshold
+    );
     assert!(circuit_open, "primary circuit should be open");
 
     // The fallback should have been called 3 times (once per request)
-    assert_eq!(fallback_count.load(Ordering::SeqCst), 3, "fallback should have been called for all 3 requests");
+    assert_eq!(
+        fallback_count.load(Ordering::SeqCst),
+        3,
+        "fallback should have been called for all 3 requests"
+    );
     // Primary was called 2 times (then skipped on 3rd)
-    assert_eq!(primary_count.load(Ordering::SeqCst), 2, "primary should have been called twice then circuit-open");
+    assert_eq!(
+        primary_count.load(Ordering::SeqCst),
+        2,
+        "primary should have been called twice then circuit-open"
+    );
 }
 
 #[tokio::test]
@@ -245,7 +267,12 @@ async fn test_circuit_breaker_state_persists_across_calls() {
     // Circuit should still be closed (only threshold-1 failures)
     let states = provider.circuit_breaker_states();
     let (failure_count, circuit_open) = states.get("primary").copied().unwrap_or_default();
-    assert_eq!(failure_count, threshold - 1, "{} failures so far", threshold - 1);
+    assert_eq!(
+        failure_count,
+        threshold - 1,
+        "{} failures so far",
+        threshold - 1
+    );
     assert!(!circuit_open, "circuit should still be closed");
 
     // One more call triggers the circuit breaker

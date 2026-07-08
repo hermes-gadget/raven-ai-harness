@@ -160,7 +160,10 @@ impl ReliabilityTracker {
 
     /// Record a call outcome.
     pub fn record(&self, tool_name: &str, record: CallRecord) {
-        let mut records = self.records.write().expect("reliability tracker lock poisoned");
+        let mut records = self
+            .records
+            .write()
+            .expect("reliability tracker lock poisoned");
         let entry = records.entry(tool_name.to_string()).or_default();
         entry.push(record);
 
@@ -176,7 +179,10 @@ impl ReliabilityTracker {
     /// Returns 0.0–1.0, where 1.0 means perfect reliability in recent history.
     /// Tools with no data get `config.default_score`.
     pub fn score(&self, tool_name: &str) -> f64 {
-        let records = self.records.read().expect("reliability tracker lock poisoned");
+        let records = self
+            .records
+            .read()
+            .expect("reliability tracker lock poisoned");
         let entry = match records.get(tool_name) {
             Some(e) if !e.is_empty() => e,
             _ => return self.config.default_score,
@@ -187,7 +193,10 @@ impl ReliabilityTracker {
 
     /// Get detailed reliability info for a tool.
     pub fn get(&self, tool_name: &str) -> ToolReliability {
-        let records = self.records.read().expect("reliability tracker lock poisoned");
+        let records = self
+            .records
+            .read()
+            .expect("reliability tracker lock poisoned");
         let entry = records.get(tool_name);
 
         let (total, successes, failures, avg_ms, score, mature) = match entry {
@@ -232,38 +241,48 @@ impl ReliabilityTracker {
 
     /// Get reliability info for all tracked tools.
     pub fn all(&self) -> Vec<ToolReliability> {
-        let records = self.records.read().expect("reliability tracker lock poisoned");
-        let mut results: Vec<ToolReliability> = records
-            .keys()
-            .map(|name| self.get(name))
-            .collect();
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        let records = self
+            .records
+            .read()
+            .expect("reliability tracker lock poisoned");
+        let mut results: Vec<ToolReliability> = records.keys().map(|name| self.get(name)).collect();
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         results
     }
 
     /// List tools below the alert threshold.
     pub fn unreliable(&self) -> Vec<ToolReliability> {
-        self.all()
-            .into_iter()
-            .filter(|r| r.is_unreliable)
-            .collect()
+        self.all().into_iter().filter(|r| r.is_unreliable).collect()
     }
 
     /// Reset tracking data for a tool.
     pub fn reset(&self, tool_name: &str) {
-        let mut records = self.records.write().expect("reliability tracker lock poisoned");
+        let mut records = self
+            .records
+            .write()
+            .expect("reliability tracker lock poisoned");
         records.remove(tool_name);
     }
 
     /// Reset all tracking data.
     pub fn reset_all(&self) {
-        let mut records = self.records.write().expect("reliability tracker lock poisoned");
+        let mut records = self
+            .records
+            .write()
+            .expect("reliability tracker lock poisoned");
         records.clear();
     }
 
     /// Number of tools being tracked.
     pub fn tool_count(&self) -> usize {
-        self.records.read().expect("reliability tracker lock poisoned").len()
+        self.records
+            .read()
+            .expect("reliability tracker lock poisoned")
+            .len()
     }
 
     // -- internals ----------------------------------------------------------

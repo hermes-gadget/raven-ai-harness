@@ -98,15 +98,8 @@ async fn test_task_history_query_by_session_id() {
         .await
         .expect("query by agent + session");
 
-    assert!(
-        !results.is_empty(),
-        "should find entries for the session"
-    );
-    assert_eq!(
-        results.len(),
-        5,
-        "all 5 entries should be returned"
-    );
+    assert!(!results.is_empty(), "should find entries for the session");
+    assert_eq!(results.len(), 5, "all 5 entries should be returned");
 
     // All returned entries should belong to the queried session and agent
     for entry in &results {
@@ -114,10 +107,7 @@ async fn test_task_history_query_by_session_id() {
             entry.session_id, session_id,
             "entry session_id should match"
         );
-        assert_eq!(
-            entry.agent_id, agent_id,
-            "entry agent_id should match"
-        );
+        assert_eq!(entry.agent_id, agent_id, "entry agent_id should match");
     }
 
     // ── Verify ordering (query returns most-recent-first due to .rev()) ──
@@ -216,7 +206,10 @@ async fn test_task_history_isolation_between_sessions() {
     }
     // Verify event types
     assert_eq!(session_a_results[0].event_type, AuditEventType::SessionEnd);
-    assert_eq!(session_a_results[1].event_type, AuditEventType::SessionStart);
+    assert_eq!(
+        session_a_results[1].event_type,
+        AuditEventType::SessionStart
+    );
 
     // ── Query session B only ─────────────────────────────────────────
     let session_b_results = logger

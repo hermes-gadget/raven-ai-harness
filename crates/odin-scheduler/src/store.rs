@@ -8,7 +8,7 @@ use crate::job::{Job, JobId, Schedule};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use odin_core::error::OdinError;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -169,8 +169,9 @@ pub struct SqliteSchedulerStore {
 impl SqliteSchedulerStore {
     /// Open (or create) a SQLite database at the given file path.
     pub fn new(path: &str) -> odin_core::error::OdinResult<Self> {
-        let conn = Connection::open(path)
-            .map_err(|e| OdinError::Database(format!("Failed to open scheduler database at {path}: {e}")))?;
+        let conn = Connection::open(path).map_err(|e| {
+            OdinError::Database(format!("Failed to open scheduler database at {path}: {e}"))
+        })?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -181,8 +182,9 @@ impl SqliteSchedulerStore {
 
     /// Create an in-memory SQLite database (useful for testing).
     pub fn in_memory() -> odin_core::error::OdinResult<Self> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| OdinError::Database(format!("Failed to open in-memory scheduler database: {e}")))?;
+        let conn = Connection::open_in_memory().map_err(|e| {
+            OdinError::Database(format!("Failed to open in-memory scheduler database: {e}"))
+        })?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -298,8 +300,9 @@ impl SchedulerStore for SqliteSchedulerStore {
 
         let mut jobs = Vec::new();
         for row in rows {
-            let raw = row
-                .map_err(|e| OdinError::Database(format!("Error reading scheduler job row: {e}")))?;
+            let raw = row.map_err(|e| {
+                OdinError::Database(format!("Error reading scheduler job row: {e}"))
+            })?;
 
             let last_run = raw
                 .last_run
@@ -341,7 +344,10 @@ impl SchedulerStore for SqliteSchedulerStore {
         let conn = self.conn.lock().await;
 
         let affected = conn
-            .execute("DELETE FROM scheduler_jobs WHERE id = ?1", params![id.to_string()])
+            .execute(
+                "DELETE FROM scheduler_jobs WHERE id = ?1",
+                params![id.to_string()],
+            )
             .map_err(|e| OdinError::Database(format!("Failed to delete scheduler job: {e}")))?;
 
         if affected == 0 {

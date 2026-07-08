@@ -101,7 +101,7 @@ impl ToolValidator {
             // ── type field present if object ────────────────────
             let type_val = params.get("type").and_then(|v| v.as_str());
             match type_val {
-                Some(t) if t == "object" => report.pass("schema type is 'object'"),
+                Some("object") => report.pass("schema type is 'object'"),
                 _ => report.warn("schema type is not 'object' or is missing"),
             }
 
@@ -377,7 +377,8 @@ impl ToolValidator {
     /// Compare two tool schemas for semantic identity
     /// (matching description and parameters, ignoring the name field).
     fn schemas_identical(a: &ToolSchema, b: &ToolSchema) -> bool {
-        a.function.description == b.function.description && a.function.parameters == b.function.parameters
+        a.function.description == b.function.description
+            && a.function.parameters == b.function.parameters
     }
 }
 
@@ -492,11 +493,8 @@ impl DoctorReport {
         }
 
         // Ecosystem checks
-        let eco_statuses: Vec<DoctorCheckStatus> = self
-            .ecosystem_checks
-            .iter()
-            .map(|ec| ec.status)
-            .collect();
+        let eco_statuses: Vec<DoctorCheckStatus> =
+            self.ecosystem_checks.iter().map(|ec| ec.status).collect();
         for status in &eco_statuses {
             match status {
                 DoctorCheckStatus::Pass => self.summary.passed += 1,
@@ -513,7 +511,11 @@ impl DoctorReport {
         self.summary.healthy_tools = self
             .tool_checks
             .iter()
-            .filter(|tc| tc.checks.iter().all(|c| c.status != DoctorCheckStatus::Fail))
+            .filter(|tc| {
+                tc.checks
+                    .iter()
+                    .all(|c| c.status != DoctorCheckStatus::Fail)
+            })
             .count();
         self.summary.unhealthy_tools = self.summary.total_tools - self.summary.healthy_tools;
     }
@@ -580,8 +582,8 @@ impl ToolDoctor {
             // 3. Valid JSON schema
             let schema = tool.schema();
             let params = &schema.function.parameters;
-            let schema_valid = params.is_object()
-                && params.get("type").and_then(|v| v.as_str()) == Some("object");
+            let schema_valid =
+                params.is_object() && params.get("type").and_then(|v| v.as_str()) == Some("object");
             checks.push(DoctorCheckItem {
                 name: "valid JSON schema".into(),
                 status: if schema_valid {
@@ -603,15 +605,16 @@ impl ToolDoctor {
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
-                let has_props = params.get("properties").and_then(|v| v.as_object()).is_some();
+                let has_props = params
+                    .get("properties")
+                    .and_then(|v| v.as_object())
+                    .is_some();
                 let all_documented = if required > 0 {
                     params
                         .get("required")
                         .and_then(|v| v.as_array())
                         .map(|a| {
-                            let props = params
-                                .get("properties")
-                                .and_then(|v| v.as_object());
+                            let props = params.get("properties").and_then(|v| v.as_object());
                             match props {
                                 Some(p) => a.iter().all(|f| {
                                     f.as_str().map(|s| p.contains_key(s)).unwrap_or(false)
@@ -678,7 +681,11 @@ impl ToolDoctor {
                     status: DoctorCheckStatus::Warn,
                     detail: Some(format!(
                         "is_dangerous()={is_dangerous} but 'dangerous' tag is {}",
-                        if has_dangerous_tag { "present" } else { "missing" }
+                        if has_dangerous_tag {
+                            "present"
+                        } else {
+                            "missing"
+                        }
                     )),
                 });
             } else if is_dangerous && !tool.requires_approval() {
@@ -938,10 +945,7 @@ mod tests {
         for tool in &tools {
             let report = ToolValidator::validate_schema(tool.as_ref());
 
-            assert!(
-                !tool.name().is_empty(),
-                "tool name should be non-empty"
-            );
+            assert!(!tool.name().is_empty(), "tool name should be non-empty");
             assert!(
                 !tool.description().is_empty(),
                 "tool '{}' description should be non-empty",
@@ -1069,10 +1073,8 @@ mod tests {
         let sandbox = Arc::new(Sandbox::default());
 
         // Shell and Git are explicitly dangerous and require approval
-        let explicit_dangerous: Vec<Box<dyn Tool>> = vec![
-            Box::new(Shell::new()),
-            Box::new(Git::new()),
-        ];
+        let explicit_dangerous: Vec<Box<dyn Tool>> =
+            vec![Box::new(Shell::new()), Box::new(Git::new())];
 
         for tool in &explicit_dangerous {
             assert!(
@@ -1133,7 +1135,10 @@ mod tests {
         let shell = Shell::new();
         let report = ToolValidator::validate_permissions(&shell);
         assert!(
-            report.passed.iter().any(|c| c.contains("requires approval")),
+            report
+                .passed
+                .iter()
+                .any(|c| c.contains("requires approval")),
             "shell permission report should include approval check: {:?}",
             report.passed
         );
@@ -1191,7 +1196,8 @@ mod tests {
                 tool.name()
             );
             assert_eq!(
-                tags, *expected_tags,
+                tags,
+                *expected_tags,
                 "tool '{}' capability tags mismatch",
                 tool.name()
             );
@@ -1356,11 +1362,7 @@ mod tests {
     // ── Enable / Disable Filtering Tests ───────────────────────
 
     /// Helper that mirrors the tool_enabled closure used in CLI/Gateway.
-    fn is_tool_allowed(
-        enabled: &[String],
-        disabled: &[String],
-        name: &str,
-    ) -> bool {
+    fn is_tool_allowed(enabled: &[String], disabled: &[String], name: &str) -> bool {
         if !enabled.is_empty() && !enabled.iter().any(|e| e == name) {
             return false;
         }
@@ -1508,7 +1510,10 @@ mod tests {
             DoctorCheckStatus::Fail,
             "duplicates should be detected as failure"
         );
-        assert!(!report.healthy, "report should be unhealthy with duplicates");
+        assert!(
+            !report.healthy,
+            "report should be unhealthy with duplicates"
+        );
     }
 
     #[test]
@@ -1534,8 +1539,7 @@ mod tests {
     #[test]
     fn test_doctor_check_one_existing_tool() {
         let registry = builtin_registry();
-        let report = ToolDoctor::check_one(&registry, "shell")
-            .expect("should find 'shell' tool");
+        let report = ToolDoctor::check_one(&registry, "shell").expect("should find 'shell' tool");
 
         assert_eq!(report.tool_checks.len(), 1);
         assert_eq!(report.tool_checks[0].tool_name, "shell");

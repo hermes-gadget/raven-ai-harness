@@ -69,31 +69,29 @@ impl EventHandler for DiscordEventHandler {
                     "Submit a task to the Odin runtime",
                 )
                 .add_sub_option(
-                    CreateCommandOption::new(CommandOptionType::String, "task", "The task goal or description")
-                        .required(true),
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "task",
+                        "The task goal or description",
+                    )
+                    .required(true),
                 ),
             )
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::SubCommand,
-                    "status",
-                    "Show runtime status summary (agents, sessions, sub-agents)",
-                ),
-            )
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::SubCommand,
-                    "sessions",
-                    "List recent sessions",
-                ),
-            )
-            .add_option(
-                CreateCommandOption::new(
-                    CommandOptionType::SubCommand,
-                    "tasks",
-                    "List recent tasks",
-                ),
-            );
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "status",
+                "Show runtime status summary (agents, sessions, sub-agents)",
+            ))
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "sessions",
+                "List recent sessions",
+            ))
+            .add_option(CreateCommandOption::new(
+                CommandOptionType::SubCommand,
+                "tasks",
+                "List recent tasks",
+            ));
 
         match Command::set_global_commands(&ctx.http, vec![cmd]).await {
             Ok(cmds) => tracing::info!(
@@ -241,21 +239,14 @@ impl DiscordEventHandler {
     }
 
     /// Handle `/odin run <task>` — submit a task to the runtime and post updates to a thread.
-    async fn handle_run(
-        &self,
-        ctx: Context,
-        command: CommandInteraction,
-        task_goal: String,
-    ) {
+    async fn handle_run(&self, ctx: Context, command: CommandInteraction, task_goal: String) {
         let channel_id = command.channel_id;
 
         // Acknowledge the interaction immediately (defer, then follow-up)
         let _ = command
             .create_response(
                 &ctx.http,
-                CreateInteractionResponse::Defer(
-                    CreateInteractionResponseMessage::new(),
-                ),
+                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
             )
             .await;
 
@@ -354,9 +345,8 @@ impl DiscordEventHandler {
                         .send_message(
                             thread_id,
                             vec![],
-                            &CreateMessage::new().content(
-                                "❌ **Error:** No agents registered in the runtime.",
-                            ),
+                            &CreateMessage::new()
+                                .content("❌ **Error:** No agents registered in the runtime."),
                         )
                         .await;
                     return;
@@ -383,7 +373,11 @@ impl DiscordEventHandler {
                          **Confidence:** {:.1}%\n\
                          **Summary:** {}",
                         task_id,
-                        if task_result.success { "Completed" } else { "Stopped" },
+                        if task_result.success {
+                            "Completed"
+                        } else {
+                            "Stopped"
+                        },
                         task_result.iterations,
                         task_result.tool_calls,
                         task_result.confidence * 100.0,
@@ -441,10 +435,7 @@ impl DiscordEventHandler {
                 } else {
                     let mut lines = vec!["**Recent Sessions**".to_string()];
                     for session in sessions.iter().rev().take(10) {
-                        let label = session
-                            .label
-                            .as_deref()
-                            .unwrap_or("(no label)");
+                        let label = session.label.as_deref().unwrap_or("(no label)");
                         let created = session.created_at.format("%Y-%m-%d %H:%M UTC");
                         let msgs = session.message_count();
                         lines.push(format!(
@@ -540,9 +531,11 @@ impl DiscordGateway {
             return Ok(());
         }
 
-        let token = self.config.token.clone().ok_or_else(|| {
-            OdinError::Config("Discord token is required but not set".into())
-        })?;
+        let token = self
+            .config
+            .token
+            .clone()
+            .ok_or_else(|| OdinError::Config("Discord token is required but not set".into()))?;
 
         tracing::info!("[DISCORD] Starting Discord gateway...");
 
@@ -560,7 +553,7 @@ impl DiscordGateway {
         // Create a shutdown channel
         let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
 
-        let _ = self.connected.store(false, Ordering::SeqCst);
+        self.connected.store(false, Ordering::SeqCst);
         self.started.store(true, Ordering::SeqCst);
         {
             let mut shutdown = self.shutdown.lock().await;
@@ -639,11 +632,7 @@ impl DiscordGateway {
     ///
     /// Useful for out-of-band messages when the gateway hasn't been started
     /// but the token is available. Creates a temporary HTTP client.
-    pub async fn send_message_raw(
-        token: &str,
-        channel_id: &str,
-        content: &str,
-    ) -> OdinResult<()> {
+    pub async fn send_message_raw(token: &str, channel_id: &str, content: &str) -> OdinResult<()> {
         let cid = serenity::all::ChannelId::new(
             channel_id
                 .parse::<u64>()
@@ -676,10 +665,7 @@ impl DiscordGateway {
 ///
 /// Searches through `options` (which may be nested under a SubCommand)
 /// for an option with the given `name` and a `String` value.
-fn extract_subcommand_string(
-    options: &[CommandDataOption],
-    name: &str,
-) -> Option<String> {
+fn extract_subcommand_string(options: &[CommandDataOption], name: &str) -> Option<String> {
     for opt in options {
         match &opt.value {
             CommandDataOptionValue::SubCommand(sub_options) => {
@@ -777,7 +763,10 @@ mod tests {
         let runtime = Arc::new(Runtime::new());
         let gateway = DiscordGateway::new(config, runtime);
         let result = gateway.start().await;
-        assert!(result.is_ok(), "Builder should succeed with any token string; actual connection fails in background");
+        assert!(
+            result.is_ok(),
+            "Builder should succeed with any token string; actual connection fails in background"
+        );
     }
 
     #[tokio::test]
