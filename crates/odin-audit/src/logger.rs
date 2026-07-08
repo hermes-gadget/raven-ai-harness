@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use odin_core::error::{OdinError, OdinResult};
 use odin_core::traits::AuditLogger;
 use odin_core::types::{AgentId, AuditEntry, AuditEventType, AuditResult, SessionId};
+use odin_permissions::redact::SecretRedactor;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -69,6 +70,8 @@ pub struct AuditLoggerImpl {
     buffer: Arc<RwLock<Vec<BufferedEntry>>>,
     /// File handle (opened lazily).
     file: Arc<Mutex<Option<std::fs::File>>>,
+    /// Secret/PII redactor, used when config.mask_secrets is true.
+    redactor: SecretRedactor,
 }
 
 impl AuditLoggerImpl {
@@ -97,10 +100,17 @@ impl AuditLoggerImpl {
             None
         };
 
+        let redactor = if config.mask_secrets {
+            SecretRedactor::full()
+        } else {
+            SecretRedactor::secrets_only()
+        };
+
         Self {
             config,
             buffer: Arc::new(RwLock::new(Vec::new())),
             file: Arc::new(Mutex::new(file)),
+            redactor,
         }
     }
 
@@ -240,6 +250,13 @@ impl AuditLogger for AuditLoggerImpl {
             return Ok(());
         }
 
+        // Apply secret/PII redaction if configured.
+        let entry = if self.config.mask_secrets {
+            self.redact_entry(entry)
+        } else {
+            entry
+        };
+
         debug!(
             event_type = %entry.event_type,
             agent_id = %entry.agent_id,
@@ -328,6 +345,17 @@ impl AuditLoggerImpl {
     pub async fn clear_buffer(&self) {
         self.buffer.write().await.clear();
         debug!("Audit buffer cleared");
+    }
+
+    /// Redact secrets and PII from an audit entry before logging.
+    fn redact_entry(&self, mut entry: AuditEntry) -> AuditEntry {
+        // Redact the action string (may contain command line args with secrets).
+        entry.action = self.redactor.redact(&entry.action);
+
+        // Redact the details JSON (may contain tool inputs/outputs with secrets).
+        entry.details = self.redactor.redact_json(&entry.details);
+
+        entry
     }
 }
 

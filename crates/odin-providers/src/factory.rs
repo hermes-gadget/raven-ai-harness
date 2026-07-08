@@ -2,6 +2,7 @@
 //!
 //! Resolves API keys from direct values or environment variables.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use odin_core::config::ProviderConfig;
@@ -9,10 +10,11 @@ use odin_core::error::{OdinError, OdinResult};
 use odin_core::traits::Provider;
 
 use crate::anthropic::AnthropicProvider;
+use crate::fallback::FallbackProvider;
 use crate::local::LocalProvider;
 use crate::openai_compat::OpenAiCompatProvider;
 
-/// Build a Provider from ProviderConfig, resolving API keys from env vars.
+/// Build a single Provider from ProviderConfig, resolving API keys from env vars.
 pub fn create_provider(cfg: &ProviderConfig) -> OdinResult<Arc<dyn Provider>> {
     match cfg.provider_type.as_str() {
         "openai_compat" => {
@@ -42,6 +44,54 @@ pub fn create_provider(cfg: &ProviderConfig) -> OdinResult<Arc<dyn Provider>> {
             cfg.provider_type
         ))),
     }
+}
+
+/// Build a Provider from ProviderConfig, optionally wrapping it in a FallbackProvider
+/// when `fallback_chain` is configured.
+///
+/// The `all_configs` map must contain all providers referenced in the fallback chain.
+pub fn create_provider_chain(
+    cfg: &ProviderConfig,
+    all_configs: &HashMap<String, ProviderConfig>,
+) -> OdinResult<Arc<dyn Provider>> {
+    // If no fallback chain is configured, just create a single provider
+    let fallback_names = match &cfg.fallback_chain {
+        Some(names) if !names.is_empty() => names.clone(),
+        _ => return create_provider(cfg),
+    };
+
+    // Build the primary provider
+    let primary = create_provider(cfg)?;
+    let primary_name = cfg
+        .default_model
+        .clone()
+        .unwrap_or_else(|| "primary".to_string());
+
+    // Build all fallback providers
+    let mut fallbacks: Vec<(String, Arc<dyn Provider>)> = Vec::new();
+    for name in &fallback_names {
+        let fallback_cfg = all_configs.get(name).ok_or_else(|| {
+            OdinError::Config(format!(
+                "Fallback provider '{}' not found in config providers map",
+                name
+            ))
+        })?;
+
+        let provider = create_provider(fallback_cfg)?;
+        fallbacks.push((name.clone(), provider));
+    }
+
+    let health_interval = cfg.health_check_interval_secs;
+    let circuit_threshold = cfg.circuit_breaker_threshold;
+
+    Ok(Arc::new(FallbackProvider::new(
+        format!("{}_chain", fallback_names.first().unwrap_or(&"fallback".into())),
+        primary_name,
+        primary,
+        fallbacks,
+        circuit_threshold,
+        health_interval,
+    )))
 }
 
 /// Resolve an API key from a direct value or an environment variable name.
@@ -120,6 +170,9 @@ mod tests {
             headers: Default::default(),
             timeout_secs: 60,
             max_retries: 3,
+            fallback_chain: None,
+            health_check_interval_secs: 0,
+            circuit_breaker_threshold: 0,
         };
         let result = create_provider(&cfg);
         assert!(result.is_err());
@@ -141,6 +194,9 @@ mod tests {
             headers: Default::default(),
             timeout_secs: 60,
             max_retries: 3,
+            fallback_chain: None,
+            health_check_interval_secs: 0,
+            circuit_breaker_threshold: 0,
         };
         let provider = create_provider(&cfg).unwrap();
         assert_eq!(provider.name(), "local");
@@ -157,6 +213,9 @@ mod tests {
             headers: Default::default(),
             timeout_secs: 60,
             max_retries: 3,
+            fallback_chain: None,
+            health_check_interval_secs: 0,
+            circuit_breaker_threshold: 0,
         };
         let provider = create_provider(&cfg).unwrap();
         assert_eq!(provider.name(), "openai");

@@ -7,4 +7,11 @@ pub mod discord;
 pub mod http;
 pub mod ws;
 
-pub use http::{ChatRequest, ChatResponse, GatewayState, TaskHandlerFn, run_http_server};
+pub use discord::DiscordConfig;
+pub use discord::DiscordGateway;
+pub use http::{
+    ChatRequest, ChatResponse, DoctorReportResponse, GatewayState, HealthDependencies,
+    HealthResponse, LockSummary, MetricsResponse, OrchestrateRequest, OrchestrateResponse,
+    OrchestrateStatusResponse, OrchestrateTaskInfo, TaskHandlerFn, ToolInfo,
+    ToolsListResponse, ValidationReportResponse, build_router, run_http_server,
+};

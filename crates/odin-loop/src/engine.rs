@@ -6,7 +6,7 @@
 
 use async_trait::async_trait;
 use odin_core::error::OdinResult;
-use odin_core::traits::{LoopEngine as LoopEngineTrait, LoopState, PhaseResult, Provider};
+use odin_core::traits::{AuditLogger, LoopEngine as LoopEngineTrait, LoopState, PhaseResult, Provider};
 use odin_core::types::*;
 use std::sync::Arc;
 
@@ -36,6 +36,10 @@ pub struct Engine {
     tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
     /// Optional policy engine for permission checking
     policy_engine: Option<Arc<odin_permissions::PolicyEngine>>,
+    /// Optional skill registry for loading and using markdown skills
+    skill_registry: Option<Arc<odin_skills::SkillRegistry>>,
+    /// Optional audit logger for recording tool calls and events
+    audit_logger: Option<Arc<dyn AuditLogger>>,
 }
 
 impl Engine {
@@ -50,6 +54,8 @@ impl Engine {
             escalation_provider: None,
             tool_registry: None,
             policy_engine: None,
+            skill_registry: None,
+            audit_logger: None,
         }
     }
 
@@ -75,6 +81,26 @@ impl Engine {
     pub fn with_policy_engine(mut self, engine: Arc<odin_permissions::PolicyEngine>) -> Self {
         self.policy_engine = Some(engine);
         self
+    }
+
+    /// Attach a skill registry for loading and using markdown skills.
+    pub fn with_skill_registry(mut self, registry: Arc<odin_skills::SkillRegistry>) -> Self {
+        self.skill_registry = Some(registry);
+        self
+    }
+
+    /// Attach an audit logger for recording tool calls and events.
+    pub fn with_audit_logger(mut self, logger: Arc<dyn AuditLogger>) -> Self {
+        self.audit_logger = Some(logger);
+        self
+    }
+
+    /// Load a skill by name from the registry, returning its content if found.
+    pub fn load_skill(&self, name: &str) -> Option<String> {
+        self.skill_registry
+            .as_ref()
+            .and_then(|reg| reg.get(name))
+            .map(|skill| skill.content.clone())
     }
 
     /// Set the maximum iterations.
@@ -151,6 +177,8 @@ impl LoopEngineTrait for Engine {
             escalation_provider: self.escalation_provider.clone(),
             tool_registry: self.tool_registry.clone(),
             policy_engine: self.policy_engine.clone(),
+            skill_registry: self.skill_registry.clone(),
+            audit_logger: self.audit_logger.clone(),
         };
 
         let mut total_tool_calls = 0u32;
@@ -309,6 +337,8 @@ impl LoopEngineTrait for Engine {
             escalation_provider: self.escalation_provider.clone(),
             tool_registry: self.tool_registry.clone(),
             policy_engine: self.policy_engine.clone(),
+            skill_registry: self.skill_registry.clone(),
+            audit_logger: self.audit_logger.clone(),
         };
 
         match phase {

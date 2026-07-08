@@ -13,3 +13,13 @@ tokio.workspace = true
 tracing.workspace = true
 chrono.workspace = true
 uuid.workspace = true
+
+# SQLite backend for scheduler persistence
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Runtime integration for submitting agent tasks
+odin-runtime.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile.workspace = true

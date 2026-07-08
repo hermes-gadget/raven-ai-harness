@@ -160,14 +160,35 @@ impl Default for PolicyEngine {
         Self::new(
             vec![],
             &[
+                // Destructive filesystem operations
                 r"rm\s+-rf".into(),
-                r"git\s+reset\s+--hard".into(),
-                r"git\s+push\s+--force".into(),
-                r"sudo\s+".into(),
-                r"chmod\s+777".into(),
-                r">\s*/dev/".into(),
+                r"rm\s+-r\s+/".into(),
                 r"mkfs\.".into(),
                 r"dd\s+if=".into(),
+                r">\s*/dev/".into(),
+                // Privilege escalation
+                r"sudo\s+".into(),
+                r"su\s+-".into(),
+                r"chown\s+root".into(),
+                // Permission changes
+                r"chmod\s+777".into(),
+                r"chmod\s+-R\s+777".into(),
+                // Destructive git operations
+                r"git\s+reset\s+--hard".into(),
+                r"git\s+push\s+--force".into(),
+                r"git\s+push\s+--delete\s+origin".into(),
+                r"git\s+clean\s+-fd".into(),
+                // Network dangerous
+                r"iptables\s+-F".into(),
+                r"ufw\s+disable".into(),
+                r"nc\s+-[lL]\s+-[pP]".into(),
+                // System control
+                r"shutdown\s+".into(),
+                r"reboot\s+".into(),
+                r"systemctl\s+stop\s+(docker|ssh|nginx|apache)".into(),
+                // Fork bombs / resource exhaustion
+                r":\(\)\s*\{".into(),
+                r"while\s+true".into(),
             ],
             PathBoundary::default(),
             60,

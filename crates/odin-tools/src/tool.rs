@@ -97,9 +97,25 @@ impl ToolRegistry {
         self.tools.read().map(|t| t.len()).unwrap_or(0)
     }
 
+    /// Number of enabled (non-disabled) tools.
+    ///
+    /// Since disabled tools are never registered, this is equivalent to
+    /// the total registered count.
+    pub fn enabled_count(&self) -> usize {
+        self.len()
+    }
+
     /// Returns `true` if no tools are registered.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Return all registered tools.
+    pub fn all_tools(&self) -> Vec<Arc<dyn Tool>> {
+        self.tools
+            .read()
+            .map(|t| t.values().cloned().collect())
+            .unwrap_or_default()
     }
 }
 

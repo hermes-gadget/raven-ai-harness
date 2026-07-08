@@ -43,6 +43,15 @@ pub struct Job {
     pub max_concurrent: u32,
     /// Currently running task count.
     pub running_count: u32,
+    /// Optional task goal for runtime-driven execution.
+    ///
+    /// When set, the scheduler creates an `AgentTask` from this goal
+    /// and submits it via the runtime instead of running the generic closure.
+    pub task_goal: Option<String>,
+    /// Maximum iterations when executing via runtime.
+    pub max_iterations: u32,
+    /// When this job was created.
+    pub created_at: DateTime<Utc>,
 }
 
 impl Job {
@@ -62,6 +71,9 @@ impl Job {
             run_count: 0,
             max_concurrent: 1,
             running_count: 0,
+            task_goal: None,
+            max_iterations: 100,
+            created_at: now,
         }
     }
 
@@ -95,8 +107,18 @@ impl fmt::Debug for Job {
             .field("last_run", &self.last_run)
             .field("next_run", &self.next_run)
             .field("run_count", &self.run_count)
+            .field("task_goal", &self.task_goal)
+            .field("max_iterations", &self.max_iterations)
             .finish()
     }
+}
+
+/// Create a no-op task placeholder for use when deserialising persisted jobs.
+///
+/// This is used internally when loading jobs from the store; the actual
+/// task (runtime-driven or closure-based) is set up by the scheduler.
+pub fn noop_task() -> JobTask {
+    Arc::new(|| Box::pin(async {}))
 }
 
 /// A cron-like schedule parsed from a 5-field expression.

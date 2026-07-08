@@ -38,6 +38,10 @@ pub struct Skill {
     #[serde(default)]
     pub required_tools: Vec<String>,
 
+    /// Recommended (optional) tool names for this skill.
+    #[serde(default)]
+    pub recommended_tools: Vec<String>,
+
     /// Whether this skill is enabled.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -64,6 +68,10 @@ pub struct SkillFrontmatter {
     #[serde(default)]
     pub required_tools: Vec<String>,
 
+    /// Recommended (optional) tool names.
+    #[serde(default)]
+    pub recommended_tools: Vec<String>,
+
     /// Whether this skill is enabled.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
@@ -85,6 +93,10 @@ impl SkillTrait for Skill {
 
     fn required_tools(&self) -> Vec<String> {
         self.required_tools.clone()
+    }
+
+    fn recommended_tools(&self) -> Vec<String> {
+        self.recommended_tools.clone()
     }
 
     fn enabled(&self) -> bool {
@@ -130,6 +142,7 @@ impl Skill {
                     description: frontmatter.description,
                     content: body.to_string(),
                     required_tools: frontmatter.required_tools,
+                    recommended_tools: frontmatter.recommended_tools,
                     enabled: frontmatter.enabled,
                     source_path,
                 });
@@ -149,6 +162,7 @@ impl Skill {
             description: String::new(),
             content: content.to_string(),
             required_tools: vec![],
+            recommended_tools: vec![],
             enabled: true,
             source_path,
         })
@@ -160,6 +174,7 @@ impl Skill {
             name: self.name.clone(),
             description: self.description.clone(),
             required_tools: self.required_tools.clone(),
+            recommended_tools: self.recommended_tools.clone(),
             enabled: self.enabled,
         };
         let fm_str = serde_yaml::to_string(&fm).map_err(|e| {
@@ -298,6 +313,48 @@ impl SkillRegistry {
     pub fn skills_dir(&self) -> Option<&Path> {
         self.skills_dir.as_deref()
     }
+
+    /// Get the required and recommended tools for a skill by name.
+    pub fn tools_for_skill(&self, name: &str) -> Option<SkillTools> {
+        self.skills.get(name).map(|s| SkillTools {
+            skill_name: s.name.clone(),
+            required: s.required_tools.clone(),
+            recommended: s.recommended_tools.clone(),
+        })
+    }
+
+    /// Validate all skills against a set of available tool names.
+    ///
+    /// Returns warnings for skills whose required tools are unavailable
+    /// and notes for skills whose recommended tools are unavailable.
+    pub fn validate_tools(&self, available_tools: &[String]) -> Vec<SkillValidation> {
+        let mut results = Vec::new();
+        for skill in self.skills.values() {
+            let missing_required: Vec<String> = skill
+                .required_tools
+                .iter()
+                .filter(|t| !available_tools.contains(t))
+                .cloned()
+                .collect();
+            let missing_recommended: Vec<String> = skill
+                .recommended_tools
+                .iter()
+                .filter(|t| !available_tools.contains(t))
+                .cloned()
+                .collect();
+            if !missing_required.is_empty() || !missing_recommended.is_empty() {
+                let has_errors = !skill.required_tools.is_empty()
+                    && missing_required.len() == skill.required_tools.len();
+                results.push(SkillValidation {
+                    skill_name: skill.name.clone(),
+                    missing_required,
+                    missing_recommended,
+                    has_errors,
+                });
+            }
+        }
+        results
+    }
 }
 
 // ── File loading helpers ─────────────────────────────────────────────
@@ -313,6 +370,26 @@ impl Skill {
         })?;
         Self::from_markdown(&content, Some(path.to_path_buf()))
     }
+}
+
+// ── Skill-Tool Wiring Types ──────────────────────────────────────────
+
+/// Required and recommended tools for a skill.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillTools {
+    pub skill_name: String,
+    pub required: Vec<String>,
+    pub recommended: Vec<String>,
+}
+
+/// Validation result for a skill's tool dependencies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillValidation {
+    pub skill_name: String,
+    pub missing_required: Vec<String>,
+    pub missing_recommended: Vec<String>,
+    /// True if all required tools are missing (skill effectively unusable).
+    pub has_errors: bool,
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -343,6 +420,7 @@ enabled: true
         assert_eq!(skill.name, "code-review");
         assert_eq!(skill.description, "Perform a thorough code review");
         assert_eq!(skill.required_tools, vec!["file_read", "git"]);
+        assert!(skill.recommended_tools.is_empty());
         assert!(skill.enabled);
         assert!(skill.content.contains("## Steps"));
     }
@@ -363,6 +441,7 @@ enabled: true
             description: "A test skill".into(),
             content: "# Body\n\nDo the thing.".into(),
             required_tools: vec!["shell".into()],
+            recommended_tools: vec!["git".into()],
             enabled: true,
             source_path: None,
         };
@@ -413,6 +492,7 @@ Check the PR.
             description: "Test".into(),
             content: "body".into(),
             required_tools: vec![],
+            recommended_tools: vec![],
             enabled: true,
             source_path: None,
         };
@@ -434,6 +514,7 @@ Check the PR.
             description: "".into(),
             content: "".into(),
             required_tools: vec![],
+            recommended_tools: vec![],
             enabled: true,
             source_path: None,
         });
@@ -442,6 +523,7 @@ Check the PR.
             description: "".into(),
             content: "".into(),
             required_tools: vec![],
+            recommended_tools: vec![],
             enabled: false,
             source_path: None,
         });
@@ -459,6 +541,7 @@ Check the PR.
             description: "".into(),
             content: "".into(),
             required_tools: vec![],
+            recommended_tools: vec![],
             enabled: true,
             source_path: None,
         });
@@ -468,5 +551,130 @@ Check the PR.
         assert!(removed.is_some());
         assert!(!registry.has("temp"));
         assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn test_recommended_tools_in_frontmatter() {
+        let md = r#"---
+name: deploy
+description: Deploy to production
+required_tools:
+  - shell
+  - git
+recommended_tools:
+  - github_pr_status
+  - system_info
+enabled: true
+---
+
+## Steps
+1. Check status
+2. Deploy
+"#;
+        let skill = Skill::from_markdown(md, None).unwrap();
+        assert_eq!(skill.required_tools, vec!["shell", "git"]);
+        assert_eq!(
+            skill.recommended_tools,
+            vec!["github_pr_status", "system_info"]
+        );
+    }
+
+    #[test]
+    fn test_tools_for_skill() {
+        let mut registry = SkillRegistry::new();
+        registry.register(Skill {
+            name: "analyze".into(),
+            description: "".into(),
+            content: "".into(),
+            required_tools: vec!["file_read".into(), "shell".into()],
+            recommended_tools: vec!["git".into()],
+            enabled: true,
+            source_path: None,
+        });
+
+        let tools = registry.tools_for_skill("analyze").unwrap();
+        assert_eq!(tools.skill_name, "analyze");
+        assert_eq!(tools.required, vec!["file_read", "shell"]);
+        assert_eq!(tools.recommended, vec!["git"]);
+
+        assert!(registry.tools_for_skill("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_validate_tools_missing_required() {
+        let mut registry = SkillRegistry::new();
+        registry.register(Skill {
+            name: "needs-shell".into(),
+            description: "".into(),
+            content: "".into(),
+            required_tools: vec!["shell".into(), "missing_tool".into()],
+            recommended_tools: vec![],
+            enabled: true,
+            source_path: None,
+        });
+
+        let available = vec!["shell".to_string(), "file_read".to_string()];
+        let results = registry.validate_tools(&available);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].skill_name, "needs-shell");
+        assert_eq!(results[0].missing_required, vec!["missing_tool"]);
+        assert!(!results[0].has_errors); // not all missing — "shell" is available
+    }
+
+    #[test]
+    fn test_validate_tools_all_required_missing() {
+        let mut registry = SkillRegistry::new();
+        registry.register(Skill {
+            name: "broken".into(),
+            description: "".into(),
+            content: "".into(),
+            required_tools: vec!["nonexistent".into()],
+            recommended_tools: vec![],
+            enabled: true,
+            source_path: None,
+        });
+
+        let available = vec!["shell".to_string()];
+        let results = registry.validate_tools(&available);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].has_errors); // all required tools missing
+    }
+
+    #[test]
+    fn test_validate_tools_missing_recommended_only() {
+        let mut registry = SkillRegistry::new();
+        registry.register(Skill {
+            name: "ok".into(),
+            description: "".into(),
+            content: "".into(),
+            required_tools: vec!["shell".into()],
+            recommended_tools: vec!["nice_to_have".into()],
+            enabled: true,
+            source_path: None,
+        });
+
+        let available = vec!["shell".to_string()];
+        let results = registry.validate_tools(&available);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].missing_recommended, vec!["nice_to_have"]);
+        assert!(!results[0].has_errors); // required tools all present
+    }
+
+    #[test]
+    fn test_validate_tools_no_issues() {
+        let mut registry = SkillRegistry::new();
+        registry.register(Skill {
+            name: "good".into(),
+            description: "".into(),
+            content: "".into(),
+            required_tools: vec!["shell".into()],
+            recommended_tools: vec!["git".into()],
+            enabled: true,
+            source_path: None,
+        });
+
+        let available = vec!["shell".to_string(), "git".to_string()];
+        let results = registry.validate_tools(&available);
+        assert!(results.is_empty());
     }
 }

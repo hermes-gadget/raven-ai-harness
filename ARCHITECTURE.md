@@ -1,19 +1,21 @@
-# Raven AI Harness — Architecture
+# Raven Agent — Architecture
 
-> **Next-generation AI agent harness in Rust.** Looped LLM logic for smaller/local/cheaper models.
-> Multi-agent, persistent memory, tools/skills, safety-first. Inspired by Hermes.
+> **Multi-agent orchestration platform in Rust.** Composer delegates to parallel sub-agents with structured looped LLM logic for smaller/local/cheaper models.
+> Multi-agent, task graphs, file locking, persistent memory, tools/skills, safety-first. Inspired by Hermes.
 
 ## Design Philosophy
 
-Raven is designed from the ground up for **smaller, cheaper, local models**. Unlike single-pass agent loops that expect a powerful model to get everything right in one shot, Raven wraps every model call in a structured **plan → act → inspect → critique → revise → verify → continue/stop** loop.
+Raven Agent is designed from the ground up for **smaller, cheaper, local models** running as **specialized sub-agents**. The Composer/Orchestrator receives user intent, decomposes it into a task graph, spawns sub-agents with scoped tools and files, and merges results. Unlike single-pass agent loops that expect a powerful model to get everything right in one shot, the orchestrator breaks work into isolated, parallel, independently-verifiable units of work.
 
-Small models succeed because Raven:
-1. **Decomposes** complex goals into bite-sized sub-tasks
-2. **Maintains state summaries** to keep context windows small
-3. **Self-checks** every output before committing
-4. **Retries** with escalating strategies on failure
-5. **Scores confidence** and escalates to stronger models only when needed
-6. **Verifies** tool outputs against expected schemas
+Small models succeed because the orchestrator:
+1. **Decomposes** complex goals into bite-sized sub-tasks in a task graph
+2. **Scopes** each sub-agent to only the files, tools, and context it needs
+3. **Locks** files so parallel agents don't clobber each other's work
+4. **Maintains state summaries** to keep context windows small
+5. **Self-checks** every output before committing
+6. **Retries** with escalating strategies on failure
+7. **Scores confidence** and escalates to stronger models only when needed
+8. **Verifies** tool outputs against expected schemas
 
 ## Crate Architecture
 
@@ -24,8 +26,14 @@ Small models succeed because Raven:
 └──────────────────────────┬──────────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────────┐
-│                     odin-runtime (orchestrator)                   │
-│          Agent lifecycle, session management, multi-agent         │
+│               odin-orchestrator (composer + task graph)          │
+│   Intent intake, task graph decomposition, sub-agent steering,   │
+│   file lock management, merge resolution, lifecycle tracking     │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────────┐
+│                odin-runtime (sub-agent pool + execution)          │
+│    Agent lifecycle, session management, parallel execution       │
 └──┬────────┬────────┬────────┬────────┬────────┬────────┬────────┘
    │        │        │        │        │        │        │
    ▼        ▼        ▼        ▼        ▼        ▼        ▼
@@ -47,6 +55,8 @@ Small models succeed because Raven:
 | Crate | Purpose | Key Types |
 |-------|---------|-----------|
 | `odin-core` | Foundation: types, config, errors, traits | `AgentTask`, `ToolResult`, `ModelConfig`, `OdinError` |
+| `odin-orchestrator` | Composer: task graph, sub-agent steering, file locks | `Composer`, `TaskGraph`, `FileLockManager`, `MergeResolver` |
+| `odin-runtime` | Sub-agent pool, execution, lifecycle | `Runtime`, `Session`, `Agent`, `AgentState` |
 | `odin-loop` | The looped agent engine — the key innovation | `LoopEngine`, `Phase`, `ConfidenceScore`, `StateSummary` |
 | `odin-providers` | Abstract model provider layer | `Provider`, `OpenAiCompatProvider`, `AnthropicProvider` |
 | `odin-tools` | Tool system with safety boundaries | `Tool`, `ToolRegistry`, `Sandbox`, `ToolSchema` |

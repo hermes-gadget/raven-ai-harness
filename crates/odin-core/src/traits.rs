@@ -78,6 +78,48 @@ pub trait Tool: Send + Sync {
     fn is_safe(&self) -> bool {
         true
     }
+
+    /// Capability tags for this tool (e.g., ["filesystem", "read", "safe"]).
+    fn capability_tags(&self) -> &[&str] {
+        &[]
+    }
+
+    /// Quick check for dangerous tools.
+    fn is_dangerous(&self) -> bool {
+        false
+    }
+
+    /// Validate arguments against the tool's JSON Schema.
+    ///
+    /// Default implementation checks that required fields from the schema
+    /// are present in the arguments.
+    fn validate_args(&self, args: &serde_json::Value) -> OdinResult<()> {
+        let schema = self.schema();
+        let params = &schema.function.parameters;
+
+        // Must be an object
+        if !args.is_object() {
+            return Err(crate::error::OdinError::Validation(
+                "Arguments must be a JSON object".into(),
+            ));
+        }
+
+        // Check required fields
+        if let Some(required) = params.get("required").and_then(|v| v.as_array()) {
+            for field in required {
+                if let Some(field_name) = field.as_str() {
+                    if !args.get(field_name).is_some() {
+                        return Err(crate::error::OdinError::Validation(format!(
+                            "Missing required field '{}' for tool '{}'",
+                            field_name, schema.function.name
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Context passed to tools during execution.
@@ -133,6 +175,11 @@ pub trait Skill: Send + Sync {
 
     /// List any required tools for this skill.
     fn required_tools(&self) -> Vec<String> {
+        vec![]
+    }
+
+    /// List recommended (optional) tools for this skill.
+    fn recommended_tools(&self) -> Vec<String> {
         vec![]
     }
 

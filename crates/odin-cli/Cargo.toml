@@ -15,10 +15,12 @@ odin-runtime.workspace = true
 odin-gateway = { workspace = true }
 odin-providers.workspace = true
 odin-loop.workspace = true
+odin-orchestrator = { path = "../odin-orchestrator" }
 odin-tools.workspace = true
 odin-audit.workspace = true
 odin-memory.workspace = true
 odin-scheduler.workspace = true
+odin-skills.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -118,6 +118,14 @@ impl Tool for Git {
         false
     }
 
+    fn capability_tags(&self) -> &[&str] {
+        &["version-control", "git", "dangerous"]
+    }
+
+    fn is_dangerous(&self) -> bool {
+        true
+    }
+
     #[instrument(skip(self, _context), fields(tool = self.name))]
     async fn execute(
         &self,

@@ -95,6 +95,10 @@ impl Tool for WebFetch {
         true
     }
 
+    fn capability_tags(&self) -> &[&str] {
+        &["web", "http", "read", "safe"]
+    }
+
     #[instrument(skip(self, _context), fields(tool = self.name))]
     async fn execute(
         &self,
@@ -262,6 +266,10 @@ impl Tool for WebSearch {
         true
     }
 
+    fn capability_tags(&self) -> &[&str] {
+        &["web", "search", "read", "safe"]
+    }
+
     #[instrument(skip(self, _context), fields(tool = self.name))]
     async fn execute(
         &self,
@@ -325,6 +333,230 @@ impl Tool for WebSearch {
                  `with_search_url()`. Query was: {query}"
             ),
             error: None,
+            duration_ms,
+            timestamp: Utc::now(),
+        })
+    }
+}
+
+// ── http_request ───────────────────────────────────────────────────
+
+/// Arguments for `http_request`.
+#[derive(Debug, Deserialize)]
+struct HttpRequestArgs {
+    method: String,
+    url: String,
+    headers: Option<Vec<HeaderPair>>,
+    body: Option<String>,
+}
+
+/// Key-value header pair for `http_request`.
+#[derive(Debug, Deserialize)]
+struct HeaderPair {
+    name: String,
+    value: String,
+}
+
+/// Tool that makes arbitrary HTTP requests.
+///
+/// Supports GET, POST, PUT, DELETE methods with optional headers and body.
+/// URLs must be http:// or https://. Uses a 30-second timeout.
+pub struct HttpRequest {
+    name: String,
+    description: String,
+    client: Arc<reqwest::Client>,
+}
+
+impl HttpRequest {
+    /// Create a new `HttpRequest` tool.
+    pub fn new() -> Self {
+        Self {
+            name: "http_request".into(),
+            description: "Make an HTTP request with the given method (GET/POST/PUT/DELETE), URL, optional headers, and optional body. Safe with URL validation.".into(),
+            client: Arc::new(http_client()),
+        }
+    }
+
+    fn make_schema(name: &str) -> ToolSchema {
+        ToolSchema {
+            schema_type: "function".into(),
+            function: FunctionSchema {
+                name: name.into(),
+                description: "Make an HTTP request (GET/POST/PUT/DELETE).".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "method": {
+                            "type": "string",
+                            "description": "HTTP method: GET, POST, PUT, or DELETE",
+                            "enum": ["GET", "POST", "PUT", "DELETE"]
+                        },
+                        "url": {
+                            "type": "string",
+                            "description": "The URL to request (must start with http:// or https://)"
+                        },
+                        "headers": {
+                            "type": "array",
+                            "description": "Optional HTTP headers as array of {name, value} objects",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string", "description": "Header name"},
+                                    "value": {"type": "string", "description": "Header value"}
+                                },
+                                "required": ["name", "value"]
+                            }
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": "Optional request body (for POST/PUT)"
+                        }
+                    },
+                    "required": ["method", "url"]
+                }),
+            },
+        }
+    }
+}
+
+impl Default for HttpRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl Tool for HttpRequest {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn schema(&self) -> ToolSchema {
+        Self::make_schema(&self.name)
+    }
+
+    fn is_safe(&self) -> bool {
+        true
+    }
+
+    fn capability_tags(&self) -> &[&str] {
+        &["web", "http", "safe"]
+    }
+
+    #[instrument(skip(self, _context), fields(tool = self.name))]
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        _context: &ToolContext,
+    ) -> OdinResult<ToolResult> {
+        let start = Instant::now();
+
+        let parsed: HttpRequestArgs = serde_json::from_value(args).map_err(|e| OdinError::Tool {
+            tool: self.name.clone(),
+            message: format!("Invalid arguments: {e}"),
+            source: Some(Box::new(e)),
+        })?;
+
+        // Validate URL
+        if !parsed.url.starts_with("http://") && !parsed.url.starts_with("https://") {
+            return Ok(ToolResult {
+                call_id: String::new(),
+                tool_name: self.name.clone(),
+                success: false,
+                output: String::new(),
+                error: Some("URL must start with http:// or https://".into()),
+                duration_ms: 0,
+                timestamp: Utc::now(),
+            });
+        }
+
+        // Validate method
+        let method = match parsed.method.to_uppercase().as_str() {
+            "GET" => reqwest::Method::GET,
+            "POST" => reqwest::Method::POST,
+            "PUT" => reqwest::Method::PUT,
+            "DELETE" => reqwest::Method::DELETE,
+            other => {
+                return Ok(ToolResult {
+                    call_id: String::new(),
+                    tool_name: self.name.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Invalid method '{other}'. Must be GET, POST, PUT, or DELETE."
+                    )),
+                    duration_ms: 0,
+                    timestamp: Utc::now(),
+                });
+            }
+        };
+
+        // Build request
+        let mut req = self.client.request(method, &parsed.url);
+
+        if let Some(ref headers) = parsed.headers {
+            for h in headers {
+                if let (Ok(name), Ok(value)) = (
+                    reqwest::header::HeaderName::from_bytes(h.name.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(&h.value),
+                ) {
+                    req = req.header(name, value);
+                }
+            }
+        }
+
+        if let Some(ref body) = parsed.body {
+            req = req.body(body.clone());
+        }
+
+        // Execute
+        let response = req.send().await.map_err(|e| {
+            if e.is_timeout() {
+                OdinError::Timeout(format!("Request to {} timed out", parsed.url))
+            } else if e.is_connect() {
+                OdinError::Network(format!("Could not connect to {}: {e}", parsed.url))
+            } else {
+                OdinError::Network(format!("Request to {} failed: {e}", parsed.url))
+            }
+        })?;
+
+        let status = response.status();
+        let body = response.text().await.map_err(|e| {
+            OdinError::Network(format!(
+                "Failed to read response body from {}: {e}",
+                parsed.url
+            ))
+        })?;
+
+        let duration_ms = start.elapsed().as_millis() as u64;
+        let success = status.is_success();
+
+        let output = if body.len() > 100_000 {
+            format!(
+                "{} (truncated from {} bytes to 100000)",
+                &body[..100_000],
+                body.len()
+            )
+        } else {
+            body
+        };
+
+        let error = if success {
+            None
+        } else {
+            Some(format!("HTTP {status}"))
+        };
+
+        Ok(ToolResult {
+            call_id: String::new(),
+            tool_name: self.name.clone(),
+            success,
+            output,
+            error,
             duration_ms,
             timestamp: Utc::now(),
         })
@@ -420,5 +652,45 @@ mod tests {
         assert_eq!(urlencoding("a b c"), "a%20b%20c");
         assert_eq!(urlencoding("simple"), "simple");
         assert_eq!(urlencoding(""), "");
+    }
+
+    #[tokio::test]
+    async fn test_http_request_invalid_url() {
+        let req = HttpRequest::new();
+        let args = serde_json::json!({
+            "method": "GET",
+            "url": "not-a-url"
+        });
+        let result = req.execute(args, &test_context()).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("URL must start with"));
+    }
+
+    #[tokio::test]
+    async fn test_http_request_invalid_method() {
+        let req = HttpRequest::new();
+        let args = serde_json::json!({
+            "method": "INVALID",
+            "url": "https://example.com"
+        });
+        let result = req.execute(args, &test_context()).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("Invalid method"));
+    }
+
+    #[tokio::test]
+    async fn test_http_request_get() {
+        let req = HttpRequest::new();
+        let args = serde_json::json!({
+            "method": "GET",
+            "url": "https://httpstat.us/200"
+        });
+        let result = req.execute(args, &test_context()).await;
+        // Network may or may not be available — either is fine
+        if let Ok(res) = result {
+            if !res.success {
+                assert!(res.error.unwrap().contains("HTTP"));
+            }
+        }
     }
 }

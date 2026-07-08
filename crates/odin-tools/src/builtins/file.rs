@@ -77,6 +77,10 @@ impl Tool for FileRead {
         Self::make_schema(&self.name)
     }
 
+    fn capability_tags(&self) -> &[&str] {
+        &["filesystem", "read", "safe"]
+    }
+
     #[instrument(skip(self, _context), fields(tool = self.name))]
     async fn execute(
         &self,
@@ -177,6 +181,22 @@ impl Tool for FileWrite {
 
     fn schema(&self) -> ToolSchema {
         Self::make_schema(&self.name)
+    }
+
+    fn requires_approval(&self) -> bool {
+        true // file writes always require approval for safety
+    }
+
+    fn is_safe(&self) -> bool {
+        false // file writes are not inherently safe
+    }
+
+    fn is_dangerous(&self) -> bool {
+        true
+    }
+
+    fn capability_tags(&self) -> &[&str] {
+        &["filesystem", "write", "dangerous"]
     }
 
     #[instrument(skip(self, _context), fields(tool = self.name))]

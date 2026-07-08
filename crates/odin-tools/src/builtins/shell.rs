@@ -21,10 +21,20 @@ struct ShellArgs {
     workdir: Option<String>,
     #[serde(default = "default_timeout")]
     timeout_secs: u64,
+    /// If true, validate the command without executing it.
+    #[serde(default)]
+    dry_run: bool,
+    /// Maximum output bytes before truncation (default: 1MB). Set to 0 to disable.
+    #[serde(default = "default_max_output_bytes")]
+    max_output_bytes: usize,
 }
 
 fn default_timeout() -> u64 {
     60
+}
+
+fn default_max_output_bytes() -> usize {
+    1024 * 1024 // 1MB
 }
 
 /// Tool that executes shell commands.
@@ -148,6 +158,14 @@ impl Tool for Shell {
         false // shell is not inherently safe
     }
 
+    fn capability_tags(&self) -> &[&str] {
+        &["shell", "system", "dangerous"]
+    }
+
+    fn is_dangerous(&self) -> bool {
+        true
+    }
+
     #[instrument(skip(self, _context), fields(tool = self.name))]
     async fn execute(
         &self,
@@ -174,6 +192,22 @@ impl Tool for Shell {
                 error: Some(format!(
                     "Command matches dangerous pattern and was blocked: {command_str}"
                 )),
+                duration_ms: 0,
+                timestamp: Utc::now(),
+            });
+        }
+
+        // Dry-run mode: validate without executing
+        if parsed.dry_run {
+            return Ok(ToolResult {
+                call_id: String::new(),
+                tool_name: self.name.clone(),
+                success: true,
+                output: format!(
+                    "[DRY RUN] Command would be executed (not dangerous, {}s timeout): {}",
+                    parsed.timeout_secs, command_str
+                ),
+                error: None,
                 duration_ms: 0,
                 timestamp: Utc::now(),
             });
@@ -222,6 +256,15 @@ impl Tool for Shell {
             }
             result_output.push_str("STDERR:\n");
             result_output.push_str(&String::from_utf8_lossy(&output.stderr));
+        }
+
+        // Apply output size cap if configured
+        let max_bytes = parsed.max_output_bytes;
+        if max_bytes > 0 && result_output.len() > max_bytes {
+            result_output.truncate(max_bytes);
+            result_output.push_str(&format!(
+                "\n\n[TRUNCATED: output exceeded {max_bytes} bytes]"
+            ));
         }
 
         let success = output.status.success();
@@ -330,5 +373,59 @@ mod tests {
         });
         let result = shell.execute(args, &test_context()).await.unwrap();
         assert!(!result.success);
+    }
+
+    #[tokio::test]
+    async fn test_shell_dry_run_safe_command() {
+        let shell = Shell::new();
+        let args = serde_json::json!({
+            "command": "echo 'dry run test'",
+            "dry_run": true
+        });
+        let result = shell.execute(args, &test_context()).await.unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("[DRY RUN]"));
+        assert!(result.output.contains("echo 'dry run test'"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_dry_run_dangerous_blocked() {
+        let shell = Shell::new();
+        let args = serde_json::json!({
+            "command": "rm -rf /important",
+            "dry_run": true
+        });
+        let result = shell.execute(args, &test_context()).await.unwrap();
+        // Dangerous commands are blocked even in dry-run mode
+        assert!(!result.success);
+        assert!(result.error.as_deref().unwrap_or("").contains("dangerous"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_output_truncation() {
+        let shell = Shell::new();
+        // Generate ~500 bytes then cap at 100
+        let args = serde_json::json!({
+            "command": "python3 -c \"print('x' * 500)\"",
+            "timeout_secs": 10,
+            "max_output_bytes": 100
+        });
+        let result = shell.execute(args, &test_context()).await.unwrap();
+        assert!(result.success, "STDERR: {:?}", result.error);
+        assert!(result.output.contains("[TRUNCATED"));
+        assert!(result.output.len() < 200); // should be 100 + truncation message
+    }
+
+    #[tokio::test]
+    async fn test_shell_no_truncation_when_under_limit() {
+        let shell = Shell::new();
+        let args = serde_json::json!({
+            "command": "echo 'short output'",
+            "timeout_secs": 10,
+            "max_output_bytes": 1024
+        });
+        let result = shell.execute(args, &test_context()).await.unwrap();
+        assert!(result.success, "STDERR: {:?}", result.error);
+        assert!(!result.output.contains("[TRUNCATED"));
     }
 }

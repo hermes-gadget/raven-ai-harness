@@ -51,6 +51,14 @@ models:
       timeout_secs: 120
       # Max retries for transient failures (default: 3)
       max_retries: 3
+      # Fallback chain: provider names to try in order if this one fails
+      fallback_chain:
+        - anthropic
+        - local
+      # Periodic health check interval in seconds (0 = disabled)
+      health_check_interval_secs: 30
+      # Consecutive failures before circuit breaker opens (0 = disabled)
+      circuit_breaker_threshold: 3
 
     # Anthropic provider
     anthropic:
@@ -117,6 +125,10 @@ agent:
 
   # Compress context to this ratio of the limit (default: 0.5)
   compression_ratio: 0.5
+
+  # Directory for markdown skills (default: "skills")
+  # Skills are .md files with YAML frontmatter loaded by the skill registry
+  skills_dir: ~/.odin/skills
 
 # =============================================================================
 # Tool Configuration
@@ -230,6 +242,22 @@ gateway:
   # discord_token: your_bot_token_here
   discord_token_env: DISCORD_BOT_TOKEN
 
+  # Role name required for privileged commands (e.g., "Odin Admin")
+  # Leave empty to allow anyone
+  discord_admin_role: ""
+
+  # Enable WebSocket gateway (default: false)
+  ws_enabled: false
+
+  # WebSocket listen address
+  ws_addr: 127.0.0.1:9178
+
+  # Max WebSocket connections
+  ws_max_connections: 100
+
+  # WebSocket ping interval in seconds
+  ws_ping_interval_secs: 30
+
 # =============================================================================
 # Scheduler Configuration
 # =============================================================================
@@ -242,3 +270,7 @@ scheduler:
 
   # Max concurrent jobs (default: 5)
   max_concurrent: 5
+
+  # SQLite database path for job persistence (default: ~/.odin/scheduler.db)
+  # If not set, jobs are stored in the shared memory.db
+  # db_path: ~/.odin/scheduler.db

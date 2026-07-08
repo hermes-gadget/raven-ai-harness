@@ -16,6 +16,7 @@ pub use confidence::ConfidenceScorer;
 pub use decomposer::GoalDecomposer;
 pub use engine::Engine as LoopEngine;
 pub use phases::{
-    ActPhase, CritiquePhase, DecidePhase, InspectPhase, PlanPhase, RevisePhase, VerifyPhase,
+    ActPhase, CritiquePhase, DecidePhase, InspectPhase, Phase, PhaseContext, PlanPhase,
+    RevisePhase, VerifyPhase,
 };
 pub use summarizer::StateSummarizer;

@@ -198,6 +198,18 @@ pub struct ProviderConfig {
     /// Max retries for transient failures
     #[serde(default = "default_retries")]
     pub max_retries: u32,
+
+    /// Ordered list of fallback provider names to try if this provider fails
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_chain: Option<Vec<String>>,
+
+    /// Interval in seconds for periodic health checks (0 = disabled)
+    #[serde(default)]
+    pub health_check_interval_secs: u64,
+
+    /// Number of consecutive failures before the circuit breaker opens (0 = disabled)
+    #[serde(default)]
+    pub circuit_breaker_threshold: u32,
 }
 
 fn default_timeout() -> u64 {
@@ -243,6 +255,10 @@ pub struct AgentConfig {
     /// Compress context to this ratio of the limit
     #[serde(default = "default_compression_ratio")]
     pub compression_ratio: f64,
+
+    /// Directory for markdown skills (loaded by the skill registry)
+    #[serde(default = "default_skills_dir")]
+    pub skills_dir: String,
 }
 
 fn default_max_iterations() -> u32 {
@@ -266,6 +282,9 @@ fn default_context_limit() -> u32 {
 fn default_compression_ratio() -> f64 {
     0.5
 }
+fn default_skills_dir() -> String {
+    "skills".into()
+}
 
 impl Default for AgentConfig {
     fn default() -> Self {
@@ -278,6 +297,7 @@ impl Default for AgentConfig {
             enable_summarization: default_true(),
             context_limit: default_context_limit(),
             compression_ratio: default_compression_ratio(),
+            skills_dir: default_skills_dir(),
         }
     }
 }
@@ -309,6 +329,10 @@ pub struct ToolsConfig {
     /// Custom tool directories to scan
     #[serde(default)]
     pub tool_dirs: Vec<PathBuf>,
+
+    /// MCP server configurations for loading external tools.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
 }
 
 fn default_enabled_tools() -> Vec<String> {
@@ -319,6 +343,15 @@ fn default_enabled_tools() -> Vec<String> {
         "web_search".into(),
         "web_fetch".into(),
         "git".into(),
+        "github_issue_create".into(),
+        "github_issue_search".into(),
+        "github_pr_create".into(),
+        "github_pr_status".into(),
+        "github_actions_status".into(),
+        "http_request".into(),
+        "system_info".into(),
+        "disk_usage".into(),
+        "json_extract".into(),
     ]
 }
 
@@ -335,8 +368,57 @@ impl Default for ToolsConfig {
             path_boundary: PathBoundary::default(),
             sandbox_enabled: false,
             tool_dirs: vec![],
+            mcp_servers: vec![],
         }
     }
+}
+
+// ── MCP Config ───────────────────────────────────────────────────────
+
+/// Configuration for a single MCP server connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// Human-readable name for this MCP server.
+    pub name: String,
+
+    /// The command to execute (e.g., "npx", "python", "node").
+    pub command: String,
+
+    /// Arguments to pass to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+
+    /// Transport type: "stdio" or "http".
+    #[serde(default = "default_mcp_transport_type")]
+    pub transport_type: String,
+
+    /// URL for HTTP transport (required when transport_type is "http").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+
+    /// Environment variables to set for the server process.
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+
+    /// Whether this server is enabled.
+    #[serde(default = "default_mcp_enabled")]
+    pub enabled: bool,
+
+    /// Capability tags to assign to all tools from this server.
+    #[serde(default = "default_mcp_tags")]
+    pub tags: Vec<String>,
+}
+
+fn default_mcp_transport_type() -> String {
+    "stdio".into()
+}
+
+fn default_mcp_enabled() -> bool {
+    true
+}
+
+fn default_mcp_tags() -> Vec<String> {
+    vec!["mcp".into(), "external".into(), "safe".into()]
 }
 
 // ── Memory Config ───────────────────────────────────────────────────
@@ -510,6 +592,11 @@ pub struct SchedulerConfig {
     /// Max concurrent jobs
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent: u32,
+
+    /// Database path for scheduler job persistence.
+    /// Defaults to `~/.odin/scheduler.db` if not set.
+    #[serde(default)]
+    pub db_path: Option<String>,
 }
 
 fn default_check_interval() -> u64 {
@@ -525,6 +612,7 @@ impl Default for SchedulerConfig {
             enabled: false,
             check_interval_secs: default_check_interval(),
             max_concurrent: default_max_concurrent(),
+            db_path: None,
         }
     }
 }

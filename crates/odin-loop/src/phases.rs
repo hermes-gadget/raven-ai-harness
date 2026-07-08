@@ -6,8 +6,9 @@
 
 use async_trait::async_trait;
 use odin_core::error::OdinResult;
-use odin_core::traits::{LoopState, PhaseRecord, PhaseResult, Provider, ToolContext};
+use odin_core::traits::{AuditLogger, LoopState, PhaseRecord, PhaseResult, Provider, ToolContext};
 use odin_core::types::*;
+use odin_permissions::SecretRedactor;
 use std::sync::Arc;
 
 use crate::confidence::ConfidenceScorer;
@@ -41,6 +42,10 @@ pub struct PhaseContext {
     pub tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
     /// Optional policy engine for permission checking on tool calls
     pub policy_engine: Option<Arc<odin_permissions::PolicyEngine>>,
+    /// Optional skill registry for loading and using markdown skills
+    pub skill_registry: Option<Arc<odin_skills::SkillRegistry>>,
+    /// Optional audit logger for recording tool calls and events
+    pub audit_logger: Option<Arc<dyn AuditLogger>>,
 }
 
 // ── Plan Phase ──────────────────────────────────────────────────────
@@ -65,6 +70,40 @@ impl Phase for PlanPhase {
         context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
         tracing::info!("[PLAN] Planning for task: {}", state.task.goal);
+
+        // Inject available skills into the system prompt if a registry is loaded
+        if let Some(ref registry) = context.skill_registry {
+            let skills = registry.enabled();
+            if !skills.is_empty() {
+                let mut skills_prompt = String::from(
+                    "## Available Skills\n\nYou have access to the following reusable workflows (skills). When appropriate, use them:\n\n",
+                );
+                for skill in &skills {
+                    let tools = if skill.required_tools.is_empty() {
+                        "none".to_string()
+                    } else {
+                        skill.required_tools.join(", ")
+                    };
+                    skills_prompt.push_str(&format!(
+                        "- **{}**: {}. Required tools: {}.\n",
+                        skill.name, skill.description, tools,
+                    ));
+                }
+                skills_prompt.push_str(
+                    "\nTo use a skill, include [USE_SKILL: skill-name] in your response.\n",
+                );
+
+                // Append to the first system message
+                if let Some(first) = state.messages.first_mut()
+                    && first.role == Role::System
+                {
+                    if let MessageContent::Text { content } = &mut first.content {
+                        content.push_str("\n\n");
+                        content.push_str(&skills_prompt);
+                    }
+                }
+            }
+        }
 
         // Try LLM-based decomposition if a provider is available
         let plan = if let Some(ref provider) = context.provider {
@@ -332,23 +371,53 @@ impl Phase for ActPhase {
                                 };
 
                                 let start = std::time::Instant::now();
-                                match tool.execute(args, &tool_context).await {
-                                    Ok(tr) => {
-                                        results.push(tr);
-                                    }
-                                    Err(e) => {
-                                        let tr = ToolResult {
-                                            call_id: tc.id.clone(),
-                                            tool_name: tool_name.clone(),
-                                            success: false,
-                                            output: String::new(),
-                                            error: Some(e.to_string()),
-                                            duration_ms: start.elapsed().as_millis() as u64,
-                                            timestamp: chrono::Utc::now(),
-                                        };
-                                        results.push(tr);
-                                    }
+                                // Capture input summary before moving args into execute
+                                let input_summary: String = args.to_string().chars().take(200).collect();
+                                let mut tr = match tool.execute(args, &tool_context).await {
+                                    Ok(tr) => tr,
+                                    Err(e) => ToolResult {
+                                        call_id: tc.id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        success: false,
+                                        output: String::new(),
+                                        error: Some(e.to_string()),
+                                        duration_ms: start.elapsed().as_millis() as u64,
+                                        timestamp: chrono::Utc::now(),
+                                    },
+                                };
+
+                                // Apply secret redaction before audit logging
+                                let redactor = SecretRedactor::new();
+                                tr.output = redactor.redact(&tr.output);
+                                tr.error = tr.error.as_ref().map(|e| redactor.redact(e));
+
+                                // Audit log the tool call
+                                if let Some(ref audit_logger) = context.audit_logger {
+                                    let permission_decision = if policy_denied {
+                                        "denied"
+                                    } else {
+                                        "allowed"
+                                    };
+                                    let details = serde_json::json!({
+                                        "input_summary": input_summary,
+                                        "result": if tr.success { "success" } else { "failure" },
+                                        "duration_ms": tr.duration_ms,
+                                        "permission_decision": permission_decision,
+                                    });
+                                    let audit_entry = AuditEntry {
+                                        id: uuid::Uuid::new_v4(),
+                                        timestamp: chrono::Utc::now(),
+                                        agent_id: uuid::Uuid::default(),
+                                        session_id: uuid::Uuid::default(),
+                                        event_type: AuditEventType::ToolCall,
+                                        action: tool_name.clone(),
+                                        details,
+                                        result: if tr.success { AuditResult::Success } else { AuditResult::Failure },
+                                    };
+                                    let _ = audit_logger.log(audit_entry).await;
                                 }
+
+                                results.push(tr);
                             }
                             results
                         } else {

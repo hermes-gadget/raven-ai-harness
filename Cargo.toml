@@ -13,14 +13,16 @@ members = [
     "crates/odin-gateway",
     "crates/odin-skills",
     "crates/odin-cli", "crates/odin-baseline",
+    "crates/odin-mcp",
+    "crates/odin-orchestrator",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/hermes-gadget/raven-ai-harness"
-authors = ["Raven Contributors"]
+repository = "https://github.com/hermes-gadget/raven-agent"
+authors = ["Raven Agent Contributors"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -53,6 +55,7 @@ mockall = "0.13"
 wiremock = "0.6"
 pretty_assertions = "1"
 regex = "1"
+rand = "0.8"
 sha2 = "0.10"
 hmac = "0.12"
 jsonwebtoken = "9"
@@ -63,6 +66,7 @@ percent-encoding = "2"
 bytes = "1"
 pin-project-lite = "0.2"
 arc-swap = "1"
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
 
 # Odin internal crates
 odin-core = { path = "crates/odin-core" }
@@ -76,6 +80,8 @@ odin-permissions = { path = "crates/odin-permissions" }
 odin-audit = { path = "crates/odin-audit" }
 odin-gateway = { path = "crates/odin-gateway" }
 odin-skills = { path = "crates/odin-skills" }
+odin-mcp = { path = "crates/odin-mcp" }
+odin-orchestrator = { path = "crates/odin-orchestrator" }
 
 [profile.release]
 opt-level = 3
