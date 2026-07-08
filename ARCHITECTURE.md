@@ -247,7 +247,7 @@ Supported providers (initially):
 ## Directory Structure
 
 ```
-raven-ai-harness/
+raven-agent/
 ├── Cargo.toml                  # Workspace manifest
 ├── Cargo.lock
 ├── README.md

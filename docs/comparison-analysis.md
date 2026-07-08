@@ -75,7 +75,7 @@ In real-world usage with actual LLMs:
 ## Running the Comparison
 
 ```bash
-cd raven-ai-harness
+cd raven-agent
 cargo test -p odin-loop --test comparison_harness -- --nocapture
 ```
 

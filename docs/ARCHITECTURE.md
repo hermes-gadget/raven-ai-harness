@@ -1,4 +1,4 @@
-# Raven AI Harness — Architecture
+# Raven Agent — Architecture
 
 > **Status:** This document reflects the codebase as of 2026-07-07.
 

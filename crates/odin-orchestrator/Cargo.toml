@@ -1,6 +1,6 @@
 [package]
 name = "odin-orchestrator"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 license = "MIT"
 description = "Multi-agent orchestrator: Composer, task graph, file locking, merge resolution"

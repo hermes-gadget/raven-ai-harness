@@ -24,6 +24,7 @@ use odin_core::config::OdinConfig;
 use odin_core::traits::{AuditLogger, LoopEngine, Tool};
 use odin_core::types::AgentTask;
 use odin_orchestrator::Composer;
+use odin_orchestrator::persistence::OrchestrationStore;
 use odin_runtime::{Agent, Runtime};
 use tracing_subscriber::EnvFilter;
 
@@ -800,6 +801,19 @@ async fn run_orchestrated(
     Ok(())
 }
 
+/// Get a path in the Raven Agent state directory.
+fn dirs_state_path(filename: &str) -> std::path::PathBuf {
+    let base = dirs_state_dir();
+    std::fs::create_dir_all(&base).ok();
+    base.join(filename)
+}
+
+/// Get the Raven Agent state directory.
+fn dirs_state_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".raven-agent")
+}
+
 /// `odin orchestrate` — Multi-agent orchestration commands.
 async fn cmd_orchestrate(action: OrchestrateAction) -> anyhow::Result<()> {
     match action {
@@ -810,74 +824,130 @@ async fn cmd_orchestrate(action: OrchestrateAction) -> anyhow::Result<()> {
         } => {
             tracing::info!("[ORCHESTRATE] Submitting goal: {}", goal);
 
-            let mut composer = Composer::default();
+            // Create a persistent run ID
+            let run_id = uuid::Uuid::new_v4();
 
-            // Intake the goal and decompose into a task graph
+            // Initialize the orchestration store
+            let store = odin_orchestrator::persistence::SqliteOrchestrationStore::new(
+                dirs_state_path("orchestration.db"),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize orchestration store: {e}"))?;
+            store.initialize().await.map_err(|e| anyhow::anyhow!("Store init: {e}"))?;
+
+            let mut composer = Composer::default();
             composer.intake(&goal);
+
             let node_count = {
-                // Get node count from the graph while we have mutable access
                 let graph = composer.get_graph(&goal).unwrap();
                 graph.nodes.len()
             };
 
+            // Persist the task graph
+            if let Some(graph) = composer.get_graph(&goal) {
+                let _ = store.save_task_graph(graph).await;
+            }
+
             println!("╔══════════════════════════════════════════╗");
             println!("║     Raven Agent — Orchestration         ║");
             println!("╠══════════════════════════════════════════╣");
+            println!("║  Run ID: {:<32} ║", run_id.to_string());
             println!("║  Goal:  {:<32} ║", &goal[..goal.len().min(32)]);
             println!("║  Tasks: {:<32} ║", format!("{} sub-task(s)", node_count));
             println!("╚══════════════════════════════════════════╝");
             println!();
+            println!("📋 Use 'odin orchestrate status' to check progress.");
+            println!("📋 Use 'odin orchestrate inspect {}' for details.", run_id);
 
             if node_count <= 1 {
-                println!("📋 Single task — no parallelization needed.");
+                println!("   Single task — no parallelization needed.");
                 println!("   Goal: {}", goal);
             } else {
-                println!("📋 Decomposed into {} parallel sub-tasks:", node_count);
+                println!("   Decomposed into {} parallel sub-tasks:", node_count);
                 if let Some(graph) = composer.get_graph(&goal) {
                     for (i, node) in graph.nodes.values().enumerate() {
-                        let mut info = format!("  {}. {}", i + 1, node.label);
+                        let mut info = format!("     {}. {}", i + 1, node.label);
                         if !node.write_files.is_empty() {
                             info.push_str(&format!(" [writes: {}]", node.write_files.join(", ")));
                         }
                         println!("{}", info);
-                        println!("     {}", node.goal);
                     }
                 }
             }
 
-            // Show what the composer would do
-            println!();
-            println!("🔄 Orchestrator state:");
-            let lock_summary = composer.lock_summary();
-            println!("   File locks held:  {}", lock_summary.total_locked_files);
-            println!("   Queued writers:   {}", lock_summary.queued_writers);
-
-            // Detect workstreams
+            // Show what workstreams were detected
             if let Some(graph) = composer.get_graph(&goal) {
                 let workstreams = composer.detect_workstreams(graph);
-                println!("   Workstreams:      {} (parallel groups)", workstreams.len());
+                println!();
+                println!("   Workstreams: {} parallel group(s)", workstreams.len());
                 for (i, ws) in workstreams.iter().enumerate() {
-                    println!(
-                        "     Group {}: {} agent(s)",
-                        i + 1,
-                        ws.len()
-                    );
+                    println!("     Group {}: {} agent(s)", i + 1, ws.len());
                 }
             }
-
             println!();
         }
         OrchestrateAction::Status => {
+            let store = odin_orchestrator::persistence::SqliteOrchestrationStore::new(
+                dirs_state_path("orchestration.db"),
+            ).await.map_err(|e| anyhow::anyhow!("Store: {e}"))?;
+            store.initialize().await.ok();
+
+            let graphs = store.list_task_graphs().await.unwrap_or_default();
+            let lifecycles = store.list_agent_lifecycles().await.unwrap_or_default();
+
             println!("📊 Orchestration Status");
-            println!("   Active sub-agents: 0");
-            println!("   Queued sub-agents: 0");
-            println!("   Completed:         0");
-            println!("   Failed:            0");
-            println!("   File locks held:   0");
+            println!("   Stored task graphs: {}", graphs.len());
+            for g in &graphs {
+                println!("     - '{}' ({} nodes, {})", g.root_goal, g.node_count, g.status);
+            }
+            println!("   Stored agent lifecycles: {}", lifecycles.len());
+            for lc in &lifecycles {
+                println!("     - {} ({})", lc.agent_id, lc.phase);
+            }
+            if graphs.is_empty() && lifecycles.is_empty() {
+                println!("   No stored orchestration state. Use 'odin orchestrate submit' to start a run.");
+            }
         }
         OrchestrateAction::Inspect { id } => {
-            println!("🔍 Task: {}", id);
-            println!("   Status: Not found (no persistent task store wired yet)");
+            let store = odin_orchestrator::persistence::SqliteOrchestrationStore::new(
+                dirs_state_path("orchestration.db"),
+            ).await.map_err(|e| anyhow::anyhow!("Store: {e}"))?;
+            store.initialize().await.ok();
+
+            // Try to load as a graph by root goal
+            if let Ok(graph) = store.load_task_graph(&id).await {
+                println!("🔍 Task Graph: {}", graph.root_goal);
+                println!("   Status: {:?}", graph.status);
+                println!("   Nodes: {}", graph.nodes.len());
+                for (i, node) in graph.nodes.values().enumerate() {
+                    println!("     {}. {} [{:?}]", i + 1, node.label, node.status);
+                    println!("        Goal: {}", node.goal);
+                    if !node.write_files.is_empty() {
+                        println!("        Writes: {}", node.write_files.join(", "));
+                    }
+                }
+                return Ok(());
+            }
+
+            // Try to load as an agent lifecycle
+            if let Ok(run_id) = uuid::Uuid::parse_str(&id) {
+                if let Ok(lc) = store.load_agent_lifecycle(run_id).await {
+                    println!("🔍 Agent Lifecycle: {}", lc.agent_id);
+                    println!("   Phase: {:?}", lc.phase);
+                    println!("   Created: {}", lc.created_at);
+                    if let Some(finished) = lc.finished_at {
+                        println!("   Finished: {}", finished);
+                    }
+                    if let Some(err) = &lc.error {
+                        println!("   Error: {}", err);
+                    }
+                    println!("   History: {} transition(s)", lc.history.len());
+                    return Ok(());
+                }
+            }
+
+            println!("🔍 Not found: '{}' — no task graph or agent lifecycle with that ID.", id);
+            println!("   Use 'odin orchestrate status' to list stored items.");
         }
         OrchestrateAction::Cancel { id } => {
             println!("🛑 Cancel requested for task: {}", id);

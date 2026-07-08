@@ -1,6 +1,7 @@
 # Raven Agent — TODO & Implementation Status
 
-> Updated: 2026-07-08 | Build: 0 errors | Tests: 75+ (orchestrator), 350+ total | Workspace: all green (16 crates)
+> Updated: 2026-07-08 | Build: 0 errors | Tests: 350+ | Workspace: 16 crates green
+> **Honest assessment**: v0.3 has the correct architecture (odin-orchestrator crate, 75 tests, CLI command group, HTTP endpoints). But orchestration is **stateless** — CLI commands return placeholders, the gateway creates a fresh Composer per request, no runs survive restart, Discord/WS not wired to orchestration events. This phase makes it production-grade.
 
 ## Phase 1 — Complete ✅
 
@@ -387,3 +388,103 @@
   - Orchestration with partial failure
 - [ ] API endpoints for orchestration (deferred — core engine complete)
 - [ ] Live LLM integration for smart decomposition (deferred — heuristic in place)
+
+---
+
+## Phase 6: Production Orchestration Completion ⬅️ ACTIVE
+
+> **Goal**: Turn the stateless v0.3 orchestration demo into a real production system.
+> Stateful runs, persistent state, real CLI responses, full API, Discord/WS wiring.
+
+### 6.0 — Audit & Fix Naming/Version Consistency 🔄
+- [x] Audit complete: workspace version 0.2.0→0.3.0, 1 old name in ARCHITECTURE, 1 in CHANGELOG, 1 in TODO
+- [ ] Fix workspace Cargo.toml version to 0.3.0
+- [ ] Fix odin-orchestrator Cargo.toml to use `version.workspace = true`
+- [ ] Remove remaining "raven-ai-harness" / "Raven AI Harness" from ARCHITECTURE.md, CHANGELOG.md, TODO.md
+- [ ] Update CHANGELOG.md with v0.3.0 date
+
+### 6.1 — Stateful Orchestration via SQLite ✅ (partial — persistence.rs exists)
+- [x] `OrchestrationStore` trait + `SqliteOrchestrationStore` built (366 lines)
+- [x] Task graph save/load/update works
+- [x] Agent lifecycle save/load works
+- [ ] **Wire persistence into `cmd_run` and `cmd_orchestrate`** — runs get DB IDs, state saved on transitions
+- [ ] **`odin orchestrate submit` creates a persistent run ID** (currently stateless Composer)
+- [ ] **`odin orchestrate status` queries DB** (currently returns hardcoded zeros)
+- [ ] **`odin orchestrate inspect <id>` loads from DB** (currently says "Not found")
+- [ ] **`odin orchestrate cancel/pause/resume` operates on stored state**
+- [ ] **Restore unfinished runs after restart** — load from DB on startup
+
+### 6.2 — Fix CLI Stubs (6 placeholders) ✅
+- [ ] `odin orchestrate status` — query real stored run state
+- [ ] `odin orchestrate inspect <id>` — load from DB, show task graph + agent states
+- [ ] `odin orchestrate cancel <id>` — update DB, cancel agents, release locks
+- [ ] `odin orchestrate pause/resume` — update DB, pause/resume running agents
+- [ ] `odin orchestrate agents` — list from DB for current run
+- [ ] `odin orchestrate locks/queue` — real FileLockManager state
+
+### 6.3 — Gateway: Stateful HTTP Orchestration Endpoints 🔄
+- [x] `POST /orchestrate` — creates fresh Composer (stateless, no run ID)
+- [x] `GET /orchestrate/:id/status` — returns hardcoded placeholder
+- [ ] **Give POST /orchestrate a persistent run ID**, stored in SQLite
+- [ ] **Make GET /orchestrate/:id/status return real DB state**
+- [ ] Add `POST /orchestrate/:id/pause`, `POST /orchestrate/:id/resume`, `POST /orchestrate/:id/cancel`
+- [ ] Add `GET /orchestrate/:id/agents`, `GET /orchestrate/:id/locks`
+
+### 6.4 — Discord & WebSocket Orchestration Events
+- [ ] Add `/odin orchestrate` slash command to Discord (submit, status, agents, locks)
+- [ ] Wire WebSocket broadcast to orchestration events (task_started, task_progress, task_complete, lock_acquired, lock_released)
+- [ ] WebSocket orchestration control commands (pause, resume, cancel)
+
+### 6.5 — LLM-Based Decomposition
+- [ ] Add `decompose_with_llm()` using the planning model
+- [ ] Fall back to heuristic splitting if LLM unavailable or fails
+- [ ] Detect dependencies, likely files, tools, risk, execution order
+- [ ] Persist decomposition results in task graph
+
+### 6.6 — Persistent File Locks & Write Queues
+- [x] FileLockManager built (in-memory, works correctly)
+- [ ] **Persist locks to SQLite** — survive restart
+- [ ] **Persist write queue** — queued agents restored after restart
+- [ ] FileLockManager::load_from_db() on startup
+
+### 6.7 — Sub-Agent Scoping & Per-Agent Audit
+- [ ] Sub-agents get scoped tools (only what they need, not all registered)
+- [ ] Per-agent audit trail: each sub-agent call logged with agent_id
+- [ ] Sub-agent result persistence: store outputs, errors, duration
+
+### 6.8 — Retry / Reassignment for Failed Sub-Agents
+- [ ] Failed sub-agent auto-retry (configurable max retries)
+- [ ] Reassign to different model/provider on persistent failure
+- [ ] Track retry count in AgentLifecycle (field exists)
+
+### 6.9 — MCP Tool Wiring
+- [x] odin-mcp crate built (13 tests)
+- [ ] **Wire MCP tools into CLI startup** — load MCP servers from config, register tools
+- [ ] **Wire MCP tools into gateway startup** — same registration
+- [ ] MCP tool validation integrated into `odin tools validate`
+
+### 6.10 — Tool Validation Gate
+- [x] validate-tools.sh script exists (16 steps)
+- [x] Tool validator, doctor, catalog all built and tested
+- [ ] **Run validate-tools.sh and fix any failures**
+- [ ] Every tool must have: schema, docs, permission policy, capability tags, tests
+
+### 6.11 — Verification
+- [ ] `cargo fmt --all -- --check` passes
+- [ ] `cargo clippy --workspace -- -D warnings` passes
+- [ ] `cargo check --workspace` passes
+- [ ] `cargo test --workspace` passes
+- [ ] `cargo bench --no-run` compiles
+- [ ] `scripts/validate-tools.sh` passes
+
+### Definition of Done (Phase 6)
+- [x] Architecture audit complete
+- [ ] Version/naming consistent everywhere
+- [ ] Orchestration is default and persistent (SQLite)
+- [ ] CLI/API/Discord/WS can control real runs (not placeholders)
+- [ ] Interruptions work on stored state
+- [ ] Locks/queues survive restart
+- [ ] LLM decomposition works with heuristic fallback
+- [ ] Tool validation passes (validate-tools.sh green)
+- [ ] All verification gates pass
+- [ ] TODO/docs match reality exactly

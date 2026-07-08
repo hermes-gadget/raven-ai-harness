@@ -16,7 +16,7 @@ use odin_core::types::{FunctionSchema, ToolResult, ToolSchema};
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent("OdinTools/1.0 (Raven AI Harness)")
+        .user_agent("OdinTools/0.3 (Raven Agent)")
         .build()
         .expect("Failed to build HTTP client")
 }
