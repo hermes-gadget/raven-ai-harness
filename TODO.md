@@ -396,31 +396,31 @@
 > **Goal**: Turn the stateless v0.3 orchestration demo into a real production system.
 > Stateful runs, persistent state, real CLI responses, full API, Discord/WS wiring.
 
-### 6.0 — Audit & Fix Naming/Version Consistency 🔄
+### 6.0 — Audit & Fix Naming/Version Consistency ✅
 - [x] Audit complete: workspace version 0.2.0→0.3.0, 1 old name in ARCHITECTURE, 1 in CHANGELOG, 1 in TODO
-- [ ] Fix workspace Cargo.toml version to 0.3.0
-- [ ] Fix odin-orchestrator Cargo.toml to use `version.workspace = true`
-- [ ] Remove remaining "raven-ai-harness" / "Raven AI Harness" from ARCHITECTURE.md, CHANGELOG.md, TODO.md
-- [ ] Update CHANGELOG.md with v0.3.0 date
+- [x] Fix workspace Cargo.toml version to 0.3.0
+- [x] Fix odin-orchestrator Cargo.toml to use `version.workspace = true`
+- [x] Remove remaining "raven-ai-harness" / "Raven AI Harness" from ARCHITECTURE.md, CHANGELOG.md, TODO.md, docs/ARCHITECTURE.md, docs/comparison-analysis.md, examples/config.yaml, web.rs user-agent
+- [x] Update CHANGELOG.md with v0.3.0 date
 
-### 6.1 — Stateful Orchestration via SQLite ✅ (partial — persistence.rs exists)
+### 6.1 — Stateful Orchestration via SQLite 🔄
 - [x] `OrchestrationStore` trait + `SqliteOrchestrationStore` built (366 lines)
 - [x] Task graph save/load/update works
 - [x] Agent lifecycle save/load works
-- [ ] **Wire persistence into `cmd_run` and `cmd_orchestrate`** — runs get DB IDs, state saved on transitions
-- [ ] **`odin orchestrate submit` creates a persistent run ID** (currently stateless Composer)
-- [ ] **`odin orchestrate status` queries DB** (currently returns hardcoded zeros)
-- [ ] **`odin orchestrate inspect <id>` loads from DB** (currently says "Not found")
-- [ ] **`odin orchestrate cancel/pause/resume` operates on stored state**
+- [x] **`odin orchestrate submit` creates a persistent run ID, saves to SQLite**
+- [x] **`odin orchestrate status` queries DB** (lists graphs + lifecycles)
+- [x] **`odin orchestrate inspect <id>` loads from DB** (graphs or lifecycles)
+- [ ] **`odin orchestrate cancel/pause/resume` operates on stored state** (stub, needs wiring through run_id)
 - [ ] **Restore unfinished runs after restart** — load from DB on startup
+- [ ] State directory: ~/.raven-agent/orchestration.db (created automatically)
 
-### 6.2 — Fix CLI Stubs (6 placeholders) ✅
-- [ ] `odin orchestrate status` — query real stored run state
-- [ ] `odin orchestrate inspect <id>` — load from DB, show task graph + agent states
-- [ ] `odin orchestrate cancel <id>` — update DB, cancel agents, release locks
-- [ ] `odin orchestrate pause/resume` — update DB, pause/resume running agents
-- [ ] `odin orchestrate agents` — list from DB for current run
-- [ ] `odin orchestrate locks/queue` — real FileLockManager state
+### 6.2 — Fix CLI Stubs ✅ (2/6 fixed)
+- [x] `odin orchestrate status` — queries real stored run state
+- [x] `odin orchestrate inspect <id>` — loads from DB, shows task graph + agent states
+- [ ] `odin orchestrate cancel <id>` — stub (needs active run reference)
+- [ ] `odin orchestrate pause/resume` — stub (needs active runtime)
+- [ ] `odin orchestrate agents` — stub
+- [ ] `odin orchestrate locks/queue` — stub
 
 ### 6.3 — Gateway: Stateful HTTP Orchestration Endpoints 🔄
 - [x] `POST /orchestrate` — creates fresh Composer (stateless, no run ID)
