@@ -368,6 +368,22 @@ impl App {
         tools.sort_by(|a, b| a.name.cmp(&b.name));
         app.tool_displays = tools;
 
+        if let Ok(config) = load_display_config() {
+            app.provider_name = config.models.default_provider.clone();
+            app.model_name = config
+                .models
+                .default_model
+                .clone()
+                .or_else(|| {
+                    config
+                        .models
+                        .providers
+                        .get(&config.models.default_provider)
+                        .and_then(|p| p.default_model.clone())
+                })
+                .unwrap_or_default();
+        }
+
         app.refresh_orchestration().await.ok();
         app.add_message(
             MessageRole::System,
@@ -618,7 +634,10 @@ impl App {
             "pause" => {
                 self.send_runner_command(RunnerCommand::Pause)?;
                 self.mode = RunMode::Paused;
-                self.add_message(MessageRole::System, "Pause requested for active run.");
+                self.add_message(
+                    MessageRole::System,
+                    "Pause requested: no new agents will start. In-flight model/tool calls may still finish.",
+                );
                 self.last_action = "pause requested".into();
             }
             "resume" => {
@@ -957,6 +976,9 @@ impl App {
                 self.error_count += 1;
                 self.mode = RunMode::Idle;
                 self.runner_tx = None;
+                self.runner_rx = None;
+                self.active_run_id = None;
+                self.running_runs.clear();
                 self.add_log(LogLevel::Error, "runner", &message);
                 self.add_message(MessageRole::System, format!("Runner error: {message}"));
             }
@@ -1485,6 +1507,30 @@ fn progress_for_phase(phase: &str) -> u32 {
 
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+fn load_display_config() -> Result<odin_core::config::OdinConfig> {
+    if let Some(path) = std::env::var_os("RAVEN_CONFIG")
+        .or_else(|| std::env::var_os("ODIN_CONFIG"))
+        .map(PathBuf::from)
+    {
+        if path.exists() {
+            return Ok(odin_core::config::OdinConfig::load(&path)?);
+        }
+    }
+    for candidate in [
+        "~/.config/raven/config.yaml",
+        "~/.raven-agent/config.yaml",
+        "~/.odin/config.yaml",
+        "raven.yaml",
+        "odin.yaml",
+    ] {
+        let path = PathBuf::from(shellexpand::tilde(candidate).to_string());
+        if path.exists() {
+            return Ok(odin_core::config::OdinConfig::load(&path)?);
+        }
+    }
+    Ok(odin_core::config::OdinConfig::default())
 }
 
 fn spinner_frame(elapsed: Duration) -> &'static str {

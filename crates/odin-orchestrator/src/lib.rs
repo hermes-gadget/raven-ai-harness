@@ -20,7 +20,9 @@ pub mod progress;
 pub mod sub_agent;
 pub mod task_graph;
 
-pub use composer::Composer;
+pub use composer::{
+    Composer, capabilities_to_tools, default_agent_tools, default_capabilities_for_goal,
+};
 pub use file_lock::{FileLock, FileLockManager};
 pub use lifecycle::{AgentLifecycle, AgentPhase};
 pub use merge::{MergeResolver, MergeStrategy};

@@ -2,6 +2,19 @@
 
 > Updated: 2026-07-09 | Workspace version: 0.3.0
 
+## Full audit pass (2026-07-09)
+
+See [`audit.md`](audit.md) for the complete checklist, root causes, and verification.
+
+- [x] CLI multi-task `get_graph` goal-shadowing panic fixed
+- [x] CLI no longer executes agents that failed file-lock acquisition
+- [x] Sub-agent tool scoping from capabilities (not full registry by default)
+- [x] TUI runner JoinError cannot hang a run forever
+- [x] TUI Error event clears active-run handles
+- [x] Pause messaging documents in-flight work may finish
+- [x] TUI loads provider/model into top bar from config
+- [x] All required cargo/script gates green
+
 ## TUI Live Execution Bugfix
 
 Treat this as complete only after reproducing the current TUI behavior from `raven`, tracing the real submit → orchestration → event → render path, and verifying visible live progress under failure and slow-provider cases.

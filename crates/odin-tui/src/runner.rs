@@ -22,7 +22,6 @@ use odin_orchestrator::composer::ComposerConfig;
 use odin_orchestrator::lifecycle::AgentPhase;
 use odin_orchestrator::merge::{MergeStrategy, SubAgentResult};
 use odin_orchestrator::persistence::{OrchestrationStore, SqliteOrchestrationStore};
-use odin_orchestrator::sub_agent::SubAgentConfigBuilder;
 use odin_orchestrator::task_graph::{TaskGraph, TaskGraphStatus, TaskNodeStatus};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -327,13 +326,9 @@ fn register_agents(
     nodes
         .into_iter()
         .map(|node| {
-            let agent_config = SubAgentConfigBuilder::new(&node.label, &node.goal)
-                .read_files(node.read_files.clone())
-                .write_files(node.write_files.clone())
-                .max_iterations(max_iterations)
-                .priority(node.priority)
-                .task_node(node.id)
-                .build();
+            let mut agent_config = composer.create_sub_agent(&node);
+            agent_config.max_iterations = max_iterations;
+            let allowed_tools = agent_config.allowed_tools.clone();
             let agent_id = composer.register_agent(agent_config);
             composer.update_node_status(goal_key, node.id, TaskNodeStatus::Pending);
             ExecAgent {
@@ -343,7 +338,7 @@ fn register_agents(
                 goal: node.goal,
                 read_files: node.read_files,
                 write_files: node.write_files,
-                allowed_tools: Vec::new(),
+                allowed_tools,
                 priority: node.priority,
             }
         })
@@ -484,9 +479,43 @@ async fn run_loop(
                         ).await?;
                     }
                     Err(error) => {
+                        // Nested spawn in spawn_agent_execution converts panics into
+                        // AgentExecution results. A JoinError here means the outer
+                        // wrapper itself failed; fail any still-unfinished spawned agents
+                        // once the set is drained so the run cannot hang forever.
                         let _ = event_tx.send(RunnerEvent::Error {
-                            message: format!("sub-agent task failed: {error}"),
+                            message: format!("sub-agent join failed: {error}"),
                         });
+                        if join_set.is_empty() {
+                            let stuck: Vec<_> = exec_agents
+                                .iter()
+                                .filter(|agent| {
+                                    spawned.contains(&agent.agent_id)
+                                        && !terminal.contains(&agent.agent_id)
+                                })
+                                .cloned()
+                                .collect();
+                            for agent in stuck {
+                                let execution = AgentExecution {
+                                    agent_id: agent.agent_id,
+                                    label: agent.label.clone(),
+                                    write_files: agent.write_files.clone(),
+                                    result: Err(odin_core::error::OdinError::Internal(format!(
+                                        "sub-agent join failed: {error}"
+                                    ))),
+                                    elapsed: Duration::ZERO,
+                                };
+                                finish_agent_execution(
+                                    &store,
+                                    &mut composer,
+                                    &goal_key,
+                                    &execution,
+                                    &mut terminal,
+                                    &event_tx,
+                                )
+                                .await?;
+                            }
+                        }
                     }
                 }
             }
@@ -784,87 +813,107 @@ fn spawn_agent_execution(
     spawned.insert(agent.agent_id);
     join_set.spawn(async move {
         let start = std::time::Instant::now();
-        let _ = event_tx.send(RunnerEvent::AgentStage {
-            agent_id: agent.agent_id.to_string(),
-            label: agent.label.clone(),
-            stage: AgentStage::Planning,
-            detail: "agent loop starting".into(),
-            elapsed_ms: 0,
-        });
-        let context = format!(
-            "Read files: {}\nWrite files: {}",
-            if agent.read_files.is_empty() {
-                "-".to_string()
-            } else {
-                agent.read_files.join(", ")
-            },
-            if agent.write_files.is_empty() {
-                "-".to_string()
-            } else {
-                agent.write_files.join(", ")
+        let agent_id = agent.agent_id;
+        let label = agent.label.clone();
+        let write_files = agent.write_files.clone();
+
+        // Nested task so a panic becomes a failed AgentExecution with id, not a
+        // JoinError that can leave the outer run loop hung forever.
+        let inner = tokio::spawn(async move {
+            let _ = event_tx.send(RunnerEvent::AgentStage {
+                agent_id: agent.agent_id.to_string(),
+                label: agent.label.clone(),
+                stage: AgentStage::Planning,
+                detail: "agent loop starting".into(),
+                elapsed_ms: 0,
+            });
+            let context = format!(
+                "Read files: {}\nWrite files: {}",
+                if agent.read_files.is_empty() {
+                    "-".to_string()
+                } else {
+                    agent.read_files.join(", ")
+                },
+                if agent.write_files.is_empty() {
+                    "-".to_string()
+                } else {
+                    agent.write_files.join(", ")
+                }
+            );
+            let task = AgentTask {
+                id: Uuid::new_v4(),
+                goal: agent.goal.clone(),
+                context: Some(context),
+                sub_tasks: vec![],
+                success_criteria: vec![],
+                max_iterations,
+                created_at: chrono::Utc::now(),
+            };
+            let mut engine = odin_loop::LoopEngine::new().with_max_iterations(max_iterations);
+            if let Some(provider) = resources.provider.clone() {
+                engine = engine.with_provider(Arc::new(ProgressProvider::new(
+                    provider,
+                    agent.agent_id,
+                    agent.label.clone(),
+                    event_tx.clone(),
+                )));
             }
-        );
-        let task = AgentTask {
-            id: Uuid::new_v4(),
-            goal: agent.goal.clone(),
-            context: Some(context),
-            sub_tasks: vec![],
-            success_criteria: vec![],
-            max_iterations,
-            created_at: chrono::Utc::now(),
-        };
-        let mut engine = odin_loop::LoopEngine::new().with_max_iterations(max_iterations);
-        if let Some(provider) = resources.provider.clone() {
-            engine = engine.with_provider(Arc::new(ProgressProvider::new(
-                provider,
-                agent.agent_id,
-                agent.label.clone(),
-                event_tx.clone(),
-            )));
-        }
-        if !resources.model_name.is_empty() {
-            engine = engine.with_model_name(resources.model_name.clone());
-        }
-        if let Some(policy_engine) = resources.policy_engine.clone() {
-            engine = engine.with_policy_engine(policy_engine);
-        }
-        if let Some(registry) = resources.tool_registry.clone() {
-            let registry = registry
-                .scoped(&agent.allowed_tools)
-                .map(Arc::new)
-                .unwrap_or(registry);
-            engine = engine.with_tool_registry(registry);
-        }
-        if let Some(audit_logger) = resources.audit_logger.clone() {
-            engine = engine.with_audit_logger(Arc::new(ProgressAuditLogger::new(
-                audit_logger,
-                agent.agent_id,
-                agent.label.clone(),
-                event_tx.clone(),
-            )));
-        }
-        let result = engine.execute_task(&task).await;
-        let elapsed_ms = start.elapsed().as_millis() as u64;
-        let stage = if result.as_ref().map(|r| r.success).unwrap_or(false) {
-            AgentStage::Done
-        } else {
-            AgentStage::Failed
-        };
-        let detail = match &result {
-            Ok(result) => result.summary.clone(),
-            Err(error) => error.to_string(),
-        };
-        let _ = event_tx.send(RunnerEvent::AgentStage {
-            agent_id: agent.agent_id.to_string(),
-            label: agent.label.clone(),
-            stage,
-            detail: odin_permissions::SecretRedactor::full().redact(&detail),
-            elapsed_ms,
+            if !resources.model_name.is_empty() {
+                engine = engine.with_model_name(resources.model_name.clone());
+            }
+            if let Some(policy_engine) = resources.policy_engine.clone() {
+                engine = engine.with_policy_engine(policy_engine);
+            }
+            if let Some(registry) = resources.tool_registry.clone() {
+                let registry = if agent.allowed_tools.is_empty() {
+                    registry
+                } else {
+                    registry
+                        .scoped(&agent.allowed_tools)
+                        .map(Arc::new)
+                        .unwrap_or(registry)
+                };
+                engine = engine.with_tool_registry(registry);
+            }
+            if let Some(audit_logger) = resources.audit_logger.clone() {
+                engine = engine.with_audit_logger(Arc::new(ProgressAuditLogger::new(
+                    audit_logger,
+                    agent.agent_id,
+                    agent.label.clone(),
+                    event_tx.clone(),
+                )));
+            }
+            let result = engine.execute_task(&task).await;
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            let stage = if result.as_ref().map(|r| r.success).unwrap_or(false) {
+                AgentStage::Done
+            } else {
+                AgentStage::Failed
+            };
+            let detail = match &result {
+                Ok(result) => result.summary.clone(),
+                Err(error) => error.to_string(),
+            };
+            let _ = event_tx.send(RunnerEvent::AgentStage {
+                agent_id: agent.agent_id.to_string(),
+                label: agent.label.clone(),
+                stage,
+                detail: odin_permissions::SecretRedactor::full().redact(&detail),
+                elapsed_ms,
+            });
+            result
         });
+
+        let result = match inner.await {
+            Ok(result) => result,
+            Err(error) => Err(odin_core::error::OdinError::Internal(format!(
+                "sub-agent task failed: {error}"
+            ))),
+        };
         AgentExecution {
-            agent_id: agent.agent_id,
-            label: agent.label,
-            write_files: agent.write_files,
+            agent_id,
+            label,
+            write_files,
             result,
             elapsed: start.elapsed(),
         }

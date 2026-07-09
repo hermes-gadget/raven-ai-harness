@@ -133,7 +133,7 @@ Follow-up chat messages steer the active run instead of creating disconnected fa
 
 Chat commands:
 
-- **/pause** and **/resume** control the active in-process TUI run.
+- **/pause** and **/resume** control the active in-process TUI run. Pause stops scheduling new agents; in-flight model/tool calls may still finish until they complete or the run is cancelled.
 - **/cancel** opens an approve/deny modal before cancelling the active run.
 - **/redirect &lt;text&gt;** steers pending work in the active run.
 - **/prio &lt;agent-id-prefix&gt; &lt;priority&gt;** reprioritises matching active agents.

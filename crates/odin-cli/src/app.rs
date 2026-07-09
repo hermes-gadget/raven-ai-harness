@@ -688,7 +688,6 @@ async fn run_orchestrated(
 ) -> anyhow::Result<()> {
     use odin_orchestrator::composer::ComposerConfig;
     use odin_orchestrator::merge::{MergeStrategy, SubAgentResult};
-    use odin_orchestrator::sub_agent::SubAgentConfigBuilder;
 
     let mut composer = Composer::new(ComposerConfig {
         max_parallel: 10,
@@ -730,8 +729,12 @@ async fn run_orchestrated(
 
     // For each workstream group, spawn sub-agents.
     // Collect node data first to avoid holding an immutable borrow of composer.
-    let graph = composer.get_graph(goal).unwrap();
-    let groups = composer.detect_workstreams(graph);
+    let root_goal = goal.to_string();
+    let graph = composer
+        .get_graph(&root_goal)
+        .ok_or_else(|| anyhow::anyhow!("decomposition produced no task graph for goal"))?
+        .clone();
+    let groups = composer.detect_workstreams(&graph);
 
     // Extract all node data before mutating composer
     type NodeTaskList = Vec<(uuid::Uuid, String, String, Vec<String>, Vec<String>, u32)>;
@@ -753,125 +756,257 @@ async fn run_orchestrated(
         node_tasks.push((group_idx, tasks));
     }
 
-    let mut agent_handles = Vec::new();
+    // Register all agents first; only spawn execution when locks are granted.
+    #[derive(Clone)]
+    struct PendingAgent {
+        agent_id: uuid::Uuid,
+        label: String,
+        task_goal: String,
+        allowed_tools: Vec<String>,
+        priority: u32,
+    }
 
-    for (group_idx, tasks) in &node_tasks {
-        println!(
-            "🔄 Group {}: {} agent(s) dispatch...",
-            group_idx + 1,
-            tasks.len()
-        );
-
-        for (node_id, label, goal, read_files, write_files, priority) in tasks {
-            // Create sub-agent config
-            let agent_config = SubAgentConfigBuilder::new(label, goal)
-                .read_files(read_files.clone())
-                .write_files(write_files.clone())
-                .max_iterations(max_iterations)
-                .priority(*priority)
-                .task_node(*node_id)
-                .build();
-
+    let mut pending: Vec<PendingAgent> = Vec::new();
+    for (_group_idx, tasks) in &node_tasks {
+        for (node_id, label, task_goal, _read_files, _write_files, priority) in tasks {
+            let node = graph
+                .nodes
+                .get(node_id)
+                .ok_or_else(|| anyhow::anyhow!("missing task node {node_id}"))?;
+            let mut agent_config = composer.create_sub_agent(node);
+            agent_config.max_iterations = max_iterations;
+            agent_config.priority = *priority;
             let allowed_tools = agent_config.allowed_tools.clone();
             let agent_id = composer.register_agent(agent_config);
-
-            // Try to start (acquires file locks or queues)
-            match composer.start_agent(agent_id) {
-                Ok(()) => tracing::info!("[ORCH] Agent '{}' started", label),
-                Err(msg) => tracing::info!("[ORCH] Agent '{}' queued: {}", label, msg),
-            }
-            if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
-                store.save_agent_lifecycle(lifecycle).await?;
-            }
-            store
-                .save_task_graph(composer.get_graph(goal).unwrap())
-                .await?;
-            let lock_snapshot = serde_json::to_string(&composer.file_locks().snapshot())?;
-            store.save_lock_snapshot(&lock_snapshot).await?;
-
-            let scoped_registry =
-                Arc::new(tool_registry.scoped(&allowed_tools).map_err(|error| {
-                    anyhow::anyhow!("Failed to scope tools for agent '{label}': {error}")
-                })?);
-
-            // Spawn async task for execution (with retry)
-            let provider = provider.clone();
-            let policy_engine = policy_engine.clone();
-            let audit_logger = audit_logger.clone();
-            let goal = goal.clone();
-            let label = label.clone();
-            let label_for_result = label.clone();
-            let max_retries = 1u32; // from ComposerConfig.max_retries
-            let model_name = config.models.default_model.clone().unwrap_or_default();
-
-            let handle = tokio::spawn(async move {
-                let mut final_result = Err(odin_core::error::OdinError::Internal(
-                    "Agent did not execute".into(),
-                ));
-                let mut total_elapsed = std::time::Duration::ZERO;
-
-                for attempt in 0..=max_retries {
-                    let engine = odin_loop::LoopEngine::new()
-                        .with_provider(provider.clone())
-                        .with_model_name(model_name.clone())
-                        .with_policy_engine(policy_engine.clone())
-                        .with_max_iterations(max_iterations)
-                        .with_tool_registry(scoped_registry.clone())
-                        .with_audit_logger(audit_logger.clone());
-
-                    let task = AgentTask {
-                        id: uuid::Uuid::new_v4(),
-                        goal: goal.clone(),
-                        context: None,
-                        sub_tasks: vec![],
-                        success_criteria: vec![],
-                        max_iterations,
-                        created_at: chrono::Utc::now(),
-                    };
-
-                    let start = std::time::Instant::now();
-                    let result = engine.execute_task(&task).await;
-                    let elapsed = start.elapsed();
-                    total_elapsed += elapsed;
-
-                    let is_success = result.as_ref().map(|r| r.success).unwrap_or(false);
-
-                    if is_success || attempt == max_retries {
-                        final_result = result;
-                        break;
-                    }
-
-                    let err_msg = result
-                        .as_ref()
-                        .err()
-                        .map(|e| e.to_string())
-                        .or_else(|| result.as_ref().ok().and_then(|r| r.error.clone()))
-                        .unwrap_or_else(|| "unknown error".to_string());
-                    tracing::warn!(
-                        "[ORCH] Agent '{}' attempt {}/{} failed: {}",
-                        label_for_result,
-                        attempt + 1,
-                        max_retries + 1,
-                        err_msg
-                    );
-                }
-
-                (agent_id, label_for_result, final_result, total_elapsed)
+            pending.push(PendingAgent {
+                agent_id,
+                label: label.clone(),
+                task_goal: task_goal.clone(),
+                allowed_tools,
+                priority: *priority,
             });
-
-            agent_handles.push((agent_id, handle));
         }
     }
 
-    println!();
+    let mut agent_handles = Vec::new();
+    let mut spawned = std::collections::HashSet::<uuid::Uuid>::new();
+    let mut terminal = std::collections::HashSet::<uuid::Uuid>::new();
+    let max_retries = 1u32;
+    let model_name = config.models.default_model.clone().unwrap_or_default();
+
     println!(
-        "⏳ Waiting for {} sub-agent(s) to complete...",
-        agent_handles.len()
+        "🔄 Dispatching up to {} agent(s) with file-lock awareness...",
+        pending.len()
     );
 
-    let mut total_success = 0;
-    let mut total_fail = 0;
+    while terminal.len() < pending.len() {
+        // Start any queued agents that can acquire locks now.
+        let mut ordered: Vec<_> = pending
+            .iter()
+            .filter(|agent| {
+                !spawned.contains(&agent.agent_id) && !terminal.contains(&agent.agent_id)
+            })
+            .cloned()
+            .collect();
+        ordered.sort_by_key(|agent| (agent.priority, agent.label.clone()));
 
+        for agent in ordered {
+            match composer.start_agent(agent.agent_id) {
+                Ok(()) => {
+                    tracing::info!("[ORCH] Agent '{}' started", agent.label);
+                    spawned.insert(agent.agent_id);
+                    if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
+                        store.save_agent_lifecycle(lifecycle).await?;
+                    }
+                    let graph = composer.get_graph(&root_goal).ok_or_else(|| {
+                        anyhow::anyhow!("task graph missing for root goal during spawn")
+                    })?;
+                    store.save_task_graph(graph).await?;
+                    let lock_snapshot = serde_json::to_string(&composer.file_locks().snapshot())?;
+                    store.save_lock_snapshot(&lock_snapshot).await?;
+
+                    let scoped_registry =
+                        if agent.allowed_tools.is_empty() {
+                            tool_registry.clone()
+                        } else {
+                            Arc::new(tool_registry.scoped(&agent.allowed_tools).map_err(
+                                |error| {
+                                    anyhow::anyhow!(
+                                        "Failed to scope tools for agent '{}': {error}",
+                                        agent.label
+                                    )
+                                },
+                            )?)
+                        };
+
+                    let provider = provider.clone();
+                    let policy_engine = policy_engine.clone();
+                    let audit_logger = audit_logger.clone();
+                    let task_goal = agent.task_goal.clone();
+                    let label_for_result = agent.label.clone();
+                    let model_name = model_name.clone();
+                    let agent_id = agent.agent_id;
+
+                    let handle = tokio::spawn(async move {
+                        let mut final_result = Err(odin_core::error::OdinError::Internal(
+                            "Agent did not execute".into(),
+                        ));
+                        let mut total_elapsed = std::time::Duration::ZERO;
+
+                        for attempt in 0..=max_retries {
+                            let engine = odin_loop::LoopEngine::new()
+                                .with_provider(provider.clone())
+                                .with_model_name(model_name.clone())
+                                .with_policy_engine(policy_engine.clone())
+                                .with_max_iterations(max_iterations)
+                                .with_tool_registry(scoped_registry.clone())
+                                .with_audit_logger(audit_logger.clone());
+
+                            let task = AgentTask {
+                                id: uuid::Uuid::new_v4(),
+                                goal: task_goal.clone(),
+                                context: None,
+                                sub_tasks: vec![],
+                                success_criteria: vec![],
+                                max_iterations,
+                                created_at: chrono::Utc::now(),
+                            };
+
+                            let start = std::time::Instant::now();
+                            let result = engine.execute_task(&task).await;
+                            let elapsed = start.elapsed();
+                            total_elapsed += elapsed;
+
+                            let is_success = result.as_ref().map(|r| r.success).unwrap_or(false);
+
+                            if is_success || attempt == max_retries {
+                                final_result = result;
+                                break;
+                            }
+
+                            let err_msg = result
+                                .as_ref()
+                                .err()
+                                .map(|e| e.to_string())
+                                .or_else(|| result.as_ref().ok().and_then(|r| r.error.clone()))
+                                .unwrap_or_else(|| "unknown error".to_string());
+                            tracing::warn!(
+                                "[ORCH] Agent '{}' attempt {}/{} failed: {}",
+                                label_for_result,
+                                attempt + 1,
+                                max_retries + 1,
+                                err_msg
+                            );
+                        }
+
+                        (agent_id, label_for_result, final_result, total_elapsed)
+                    });
+                    agent_handles.push((agent.agent_id, handle));
+                }
+                Err(msg) => {
+                    tracing::info!("[ORCH] Agent '{}' queued: {}", agent.label, msg);
+                    if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
+                        store.save_agent_lifecycle(lifecycle).await?;
+                    }
+                    if let Some(graph) = composer.get_graph(&root_goal) {
+                        store.save_task_graph(graph).await?;
+                    }
+                    let lock_snapshot = serde_json::to_string(&composer.file_locks().snapshot())?;
+                    store.save_lock_snapshot(&lock_snapshot).await?;
+                }
+            }
+        }
+
+        if agent_handles.is_empty() {
+            // No in-flight work remains, but some agents never started — fail them.
+            let stuck: Vec<uuid::Uuid> = pending
+                .iter()
+                .filter(|agent| {
+                    !spawned.contains(&agent.agent_id) && !terminal.contains(&agent.agent_id)
+                })
+                .map(|agent| agent.agent_id)
+                .collect();
+            for agent_id in stuck {
+                composer.fail_agent(
+                    agent_id,
+                    "Could not acquire file locks and no running agents hold them",
+                );
+                terminal.insert(agent_id);
+                if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
+                    store.save_agent_lifecycle(lifecycle).await?;
+                }
+            }
+            if let Some(graph) = composer.get_graph(&root_goal) {
+                store.save_task_graph(graph).await?;
+            }
+            break;
+        }
+
+        // Wait for at least one agent to finish so locks can free.
+        let (spawned_agent_id, handle) = agent_handles.remove(0);
+        match handle.await {
+            Ok((agent_id, label, result, elapsed)) => match result {
+                Ok(task_result) => {
+                    println!(
+                        "  {} {} — {} ({}ms, {} iters)",
+                        if task_result.success { "✅" } else { "⚠️" },
+                        label,
+                        if task_result.success {
+                            "success"
+                        } else {
+                            "failed"
+                        },
+                        elapsed.as_millis(),
+                        task_result.iterations,
+                    );
+                    composer.complete_agent(
+                        agent_id,
+                        SubAgentResult {
+                            agent_id,
+                            name: label.clone(),
+                            summary: task_result.summary.clone(),
+                            output: Some(task_result.summary),
+                            modified_files: vec![],
+                            success: task_result.success,
+                            error: task_result.error.clone(),
+                            duration_ms: elapsed.as_millis() as u64,
+                        },
+                    );
+                    terminal.insert(agent_id);
+                    if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
+                        store.save_agent_lifecycle(lifecycle).await?;
+                    }
+                    if let Some(graph) = composer.get_graph(&root_goal) {
+                        store.save_task_graph(graph).await?;
+                    }
+                }
+                Err(e) => {
+                    println!("  ❌ {} — error: {}", label, e);
+                    composer.fail_agent(agent_id, e.to_string());
+                    terminal.insert(agent_id);
+                    if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
+                        store.save_agent_lifecycle(lifecycle).await?;
+                    }
+                    if let Some(graph) = composer.get_graph(&root_goal) {
+                        store.save_task_graph(graph).await?;
+                    }
+                }
+            },
+            Err(e) => {
+                tracing::error!("[ORCH] Sub-agent panicked: {}", e);
+                composer.fail_agent(spawned_agent_id, format!("Sub-agent task failed: {e}"));
+                terminal.insert(spawned_agent_id);
+                if let Some((_, lifecycle)) = composer.get_agent(&spawned_agent_id) {
+                    store.save_agent_lifecycle(lifecycle).await?;
+                }
+                if let Some(graph) = composer.get_graph(&root_goal) {
+                    store.save_task_graph(graph).await?;
+                }
+            }
+        }
+    }
+
+    // Drain any remaining in-flight handles.
     for (spawned_agent_id, handle) in agent_handles {
         match handle.await {
             Ok((agent_id, label, result, elapsed)) => match result {
@@ -904,13 +1039,8 @@ async fn run_orchestrated(
                     if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
                         store.save_agent_lifecycle(lifecycle).await?;
                     }
-                    store
-                        .save_task_graph(composer.get_graph(goal).unwrap())
-                        .await?;
-                    if task_result.success {
-                        total_success += 1;
-                    } else {
-                        total_fail += 1;
+                    if let Some(graph) = composer.get_graph(&root_goal) {
+                        store.save_task_graph(graph).await?;
                     }
                 }
                 Err(e) => {
@@ -919,10 +1049,9 @@ async fn run_orchestrated(
                     if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
                         store.save_agent_lifecycle(lifecycle).await?;
                     }
-                    store
-                        .save_task_graph(composer.get_graph(goal).unwrap())
-                        .await?;
-                    total_fail += 1;
+                    if let Some(graph) = composer.get_graph(&root_goal) {
+                        store.save_task_graph(graph).await?;
+                    }
                 }
             },
             Err(e) => {
@@ -931,11 +1060,23 @@ async fn run_orchestrated(
                 if let Some((_, lifecycle)) = composer.get_agent(&spawned_agent_id) {
                     store.save_agent_lifecycle(lifecycle).await?;
                 }
-                store
-                    .save_task_graph(composer.get_graph(goal).unwrap())
-                    .await?;
-                total_fail += 1;
+                if let Some(graph) = composer.get_graph(&root_goal) {
+                    store.save_task_graph(graph).await?;
+                }
             }
+        }
+    }
+
+    let mut total_success = 0;
+    let mut total_fail = 0;
+    for agent in &pending {
+        if let Some((sub, _)) = composer.get_agent(&agent.agent_id) {
+            match sub.phase {
+                odin_orchestrator::lifecycle::AgentPhase::Done => total_success += 1,
+                _ => total_fail += 1,
+            }
+        } else {
+            total_fail += 1;
         }
     }
 

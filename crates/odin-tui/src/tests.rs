@@ -622,6 +622,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_runner_error_clears_active_run_handles() {
+        let mut app = App::default_test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RunnerCommand>();
+        let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
+        app.mode = RunMode::Running;
+        app.active_run_id = Some("run-err".into());
+        app.running_runs = vec!["run-err".into()];
+        app.runner_tx = Some(tx);
+        app.runner_rx = Some(event_rx);
+
+        app.apply_runner_event(RunnerEvent::Error {
+            message: "provider unavailable".into(),
+        });
+
+        assert_eq!(app.mode, RunMode::Idle);
+        assert!(app.runner_tx.is_none());
+        assert!(app.runner_rx.is_none());
+        assert!(app.active_run_id.is_none());
+        assert!(app.running_runs.is_empty());
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| message.content.contains("provider unavailable"))
+        );
+    }
+
+    #[test]
+    fn test_pause_message_mentions_in_flight_work() {
+        let mut app = App::default_test();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.runner_tx = Some(tx);
+        app.mode = RunMode::Running;
+        app.active_run_id = Some("run-pause".into());
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            app.input = "/pause".into();
+            app.submit_goal().await.unwrap();
+        });
+
+        assert!(matches!(rx.try_recv().unwrap(), RunnerCommand::Pause));
+        assert!(app.messages.iter().any(|message| {
+            message
+                .content
+                .contains("In-flight model/tool calls may still finish")
+        }));
+    }
+
     // Helpers
     impl App {
         fn default_test() -> Self {

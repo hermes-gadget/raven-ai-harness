@@ -156,7 +156,7 @@ impl Composer {
                 goal: goal.to_string(),
                 read_files: vec![],
                 write_files: vec![],
-                required_capabilities: vec![],
+                required_capabilities: default_capabilities_for_goal(goal),
                 priority: 0,
                 status: TaskNodeStatus::Pending,
                 result: None,
@@ -172,7 +172,7 @@ impl Composer {
                     goal: sg.clone(),
                     read_files: vec![],
                     write_files: vec![],
-                    required_capabilities: vec![],
+                    required_capabilities: default_capabilities_for_goal(sg),
                     priority: i as u32,
                     status: TaskNodeStatus::Pending,
                     result: None,
@@ -410,11 +410,21 @@ impl Composer {
     // ── Sub-Agent Management ────────────────────────────────────
 
     /// Create a sub-agent config for a task graph node.
+    ///
+    /// Tools are scoped from `required_capabilities` (or a default agent toolkit
+    /// when capabilities are empty) so sub-agents do not receive the full registry.
     pub fn create_sub_agent(&self, node: &TaskNode) -> SubAgentConfig {
+        let capabilities = if node.required_capabilities.is_empty() {
+            default_capabilities_for_goal(&node.goal)
+        } else {
+            node.required_capabilities.clone()
+        };
+        let allowed_tools = capabilities_to_tools(&capabilities);
         SubAgentConfigBuilder::new(&node.label, &node.goal)
             .read_files(node.read_files.clone())
             .write_files(node.write_files.clone())
-            .capabilities(node.required_capabilities.clone())
+            .allowed_tools(allowed_tools)
+            .capabilities(capabilities)
             .max_iterations(self.config.default_max_iterations)
             .priority(node.priority)
             .task_node(node.id)
@@ -866,6 +876,140 @@ impl Composer {
     }
 }
 
+/// Default capability tags for heuristic (non-LLM) task nodes.
+pub fn default_capabilities_for_goal(goal: &str) -> Vec<String> {
+    let lower = goal.to_ascii_lowercase();
+    let mut caps = vec!["read".to_string(), "filesystem".to_string()];
+    if lower.contains("write")
+        || lower.contains("edit")
+        || lower.contains("fix")
+        || lower.contains("create")
+        || lower.contains("update")
+        || lower.contains("refactor")
+        || lower.contains("implement")
+    {
+        caps.push("write".to_string());
+    }
+    if lower.contains("shell")
+        || lower.contains("command")
+        || lower.contains("run ")
+        || lower.contains("test")
+        || lower.contains("build")
+    {
+        caps.push("shell".to_string());
+    }
+    if lower.contains("git") || lower.contains("commit") || lower.contains("branch") {
+        caps.push("git".to_string());
+    }
+    if lower.contains("http")
+        || lower.contains("web")
+        || lower.contains("fetch")
+        || lower.contains("url")
+        || lower.contains("search")
+    {
+        caps.push("web".to_string());
+    }
+    if lower.contains("github") || lower.contains("pull request") || lower.contains("issue") {
+        caps.push("github".to_string());
+    }
+    // Safe default toolkit for generic goals so agents can inspect and act.
+    if caps.len() == 2 {
+        caps.extend(["write".into(), "shell".into(), "git".into()]);
+    }
+    caps.sort();
+    caps.dedup();
+    caps
+}
+
+/// Map capability tags to concrete built-in tool names for sub-agent scoping.
+pub fn capabilities_to_tools(capabilities: &[String]) -> Vec<String> {
+    if capabilities.is_empty() {
+        return default_agent_tools();
+    }
+
+    let mut tools = Vec::new();
+    for cap in capabilities {
+        match cap.to_ascii_lowercase().as_str() {
+            "read" | "filesystem" => {
+                tools.extend(
+                    [
+                        "file_read",
+                        "file_list",
+                        "file_exists",
+                        "text_search",
+                        "json_extract",
+                        "json_validate",
+                        "disk_usage",
+                        "system_info",
+                        "time_now",
+                        "env_var",
+                    ]
+                    .map(str::to_string),
+                );
+            }
+            "write" => {
+                tools.extend(["file_write", "file_delete"].map(str::to_string));
+            }
+            "shell" => {
+                tools.extend(["shell", "process_list", "network_ping"].map(str::to_string));
+            }
+            "git" => tools.push("git".into()),
+            "web" => {
+                tools.extend(["web_fetch", "web_search", "http_request"].map(str::to_string));
+            }
+            "github" => {
+                tools.extend(
+                    [
+                        "github_issue_create",
+                        "github_issue_search",
+                        "github_pr_create",
+                        "github_pr_status",
+                        "github_actions_status",
+                    ]
+                    .map(str::to_string),
+                );
+            }
+            "safe" => tools.extend(default_agent_tools()),
+            other => {
+                // Allow explicit tool names passed as capabilities.
+                if !other.is_empty() {
+                    tools.push(other.to_string());
+                }
+            }
+        }
+    }
+    tools.sort();
+    tools.dedup();
+    if tools.is_empty() {
+        default_agent_tools()
+    } else {
+        tools
+    }
+}
+
+/// Default tool allow-list for a general-purpose sub-agent (not the full registry).
+pub fn default_agent_tools() -> Vec<String> {
+    [
+        "file_read",
+        "file_list",
+        "file_exists",
+        "file_write",
+        "text_search",
+        "shell",
+        "git",
+        "web_fetch",
+        "web_search",
+        "system_info",
+        "json_extract",
+        "json_validate",
+        "time_now",
+        "env_var",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,6 +1022,11 @@ mod tests {
 
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.root_goal, goal);
+        let node = graph.nodes.values().next().unwrap();
+        assert!(
+            !node.required_capabilities.is_empty(),
+            "heuristic nodes must declare capabilities for tool scoping"
+        );
     }
 
     #[test]
@@ -890,6 +1039,43 @@ mod tests {
         assert!(graph.nodes.values().any(|n| n.goal.contains("Fix")));
         assert!(graph.nodes.values().any(|n| n.goal.contains("docs")));
         assert!(graph.nodes.values().any(|n| n.goal.contains("tests")));
+    }
+
+    #[test]
+    fn test_create_sub_agent_scopes_tools_from_capabilities() {
+        let composer = Composer::default();
+        let node = TaskNode {
+            id: Uuid::new_v4(),
+            label: "docs".into(),
+            goal: "read the docs".into(),
+            read_files: vec!["README.md".into()],
+            write_files: vec![],
+            required_capabilities: vec!["read".into(), "filesystem".into()],
+            priority: 0,
+            status: TaskNodeStatus::Pending,
+            result: None,
+            agent_id: None,
+        };
+        let config = composer.create_sub_agent(&node);
+        assert!(config.allowed_tools.contains(&"file_read".to_string()));
+        assert!(config.allowed_tools.contains(&"file_list".to_string()));
+        assert!(!config.allowed_tools.contains(&"shell".to_string()));
+        assert!(
+            !config
+                .allowed_tools
+                .contains(&"github_pr_create".to_string())
+        );
+    }
+
+    #[test]
+    fn test_capabilities_to_tools_default_and_mapping() {
+        let defaults = capabilities_to_tools(&[]);
+        assert!(defaults.contains(&"file_read".to_string()));
+        assert!(!defaults.contains(&"github_issue_create".to_string()));
+
+        let shell = capabilities_to_tools(&["shell".into()]);
+        assert!(shell.contains(&"shell".to_string()));
+        assert!(shell.contains(&"process_list".to_string()));
     }
 
     #[test]
