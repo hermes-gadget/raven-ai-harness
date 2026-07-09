@@ -99,6 +99,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[tokio::test]
+    async fn test_persisted_running_run_without_runner_is_inspection_only() {
+        use odin_orchestrator::persistence::{OrchestrationStore, SqliteOrchestrationStore};
+        use odin_orchestrator::task_graph::{TaskGraph, TaskGraphStatus};
+
+        let mut app = App::default_test();
+        let dir = std::env::temp_dir().join(format!("raven-tui-stale-{}", uuid::Uuid::new_v4()));
+        let db_path = dir.join("orchestration.db");
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = SqliteOrchestrationStore::new(&db_path).await.unwrap();
+        store.initialize().await.unwrap();
+
+        let mut graph = TaskGraph::new("stale persisted run");
+        graph.status = TaskGraphStatus::Running;
+        store.save_task_graph(&graph).await.unwrap();
+
+        app.db_path = db_path;
+        app.refresh_orchestration().await.unwrap();
+
+        assert_eq!(app.orch.active_runs.len(), 1);
+        assert_eq!(app.mode, RunMode::Idle);
+        assert!(app.running_runs.is_empty());
+        assert!(app.active_run_id.is_none());
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| { message.content.contains("no live runner is attached") })
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn test_action_input_editing() {
         let mut app = App::default_test();
@@ -317,6 +349,40 @@ mod tests {
         assert!(app.pending_approval.is_some());
         app.deny_pending();
         assert!(app.pending_approval.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_during_model_wait_targets_active_runner() {
+        let mut app = App::default_test();
+        app.active_run_id = Some("1234567890".into());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        app.runner_tx = Some(tx);
+        app.mode = RunMode::Running;
+        app.apply_runner_event(RunnerEvent::AgentStage {
+            agent_id: "agent-wait".into(),
+            label: "main".into(),
+            stage: AgentStage::WaitingForModel,
+            detail: "waiting for model... 10s elapsed (planning/decomposition)".into(),
+            elapsed_ms: 10_000,
+        });
+
+        app.input = "/cancel".into();
+        app.submit_goal().await.unwrap();
+        assert!(app.pending_approval.is_some());
+
+        app.approve_pending().await.unwrap();
+
+        assert!(matches!(rx.try_recv().unwrap(), RunnerCommand::Cancel));
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| { message.content.contains("waiting for model... 10s elapsed") })
+        );
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| { message.content.contains("Cancel approved.") })
+        );
     }
 
     #[tokio::test]
@@ -593,6 +659,7 @@ mod tests {
                 last_runner_event_at: None,
                 last_runner_stage: String::new(),
                 stale_warning_emitted: false,
+                offline_run_notice_emitted: false,
                 live_agents: std::collections::HashMap::new(),
             }
         }

@@ -304,6 +304,7 @@ pub struct App {
     pub last_runner_event_at: Option<Instant>,
     pub last_runner_stage: String,
     pub stale_warning_emitted: bool,
+    pub offline_run_notice_emitted: bool,
     pub live_agents: HashMap<String, LiveAgentStatus>,
 }
 
@@ -343,6 +344,7 @@ impl App {
             last_runner_event_at: None,
             last_runner_stage: String::new(),
             stale_warning_emitted: false,
+            offline_run_notice_emitted: false,
             live_agents: HashMap::new(),
         };
 
@@ -1019,25 +1021,43 @@ impl App {
                     failed_count,
                 });
             }
-            self.running_runs = self
+            let persisted_unfinished_runs: Vec<String> = self
                 .orch
                 .active_runs
                 .iter()
-                .filter(|run| run.status == "running")
+                .filter(|run| matches!(run.status.as_str(), "running" | "paused" | "building"))
                 .map(|run| run.run_id.clone())
                 .collect();
-            self.mode = if self
-                .orch
-                .active_runs
-                .iter()
-                .any(|run| run.status == "paused")
-            {
-                RunMode::Paused
-            } else if self.running_runs.is_empty() {
-                RunMode::Idle
+            let has_live_runner = self.runner_tx.is_some();
+
+            if has_live_runner {
+                self.running_runs = self.active_run_id.iter().cloned().collect::<Vec<String>>();
+                if !matches!(self.mode, RunMode::Paused) {
+                    self.mode = RunMode::Running;
+                }
             } else {
-                RunMode::Running
-            };
+                self.running_runs.clear();
+                self.active_run_id = None;
+                self.mode = RunMode::Idle;
+                if !persisted_unfinished_runs.is_empty() && !self.offline_run_notice_emitted {
+                    self.offline_run_notice_emitted = true;
+                    self.add_log(
+                        LogLevel::Warn,
+                        "orchestration",
+                        format!(
+                            "{} persisted unfinished run(s) found without a live TUI runner",
+                            persisted_unfinished_runs.len()
+                        ),
+                    );
+                    self.add_message(
+                        MessageRole::System,
+                        format!(
+                            "Found {} persisted unfinished run(s), but no live runner is attached. They are shown for inspection only; submit a goal to start a live run.",
+                            persisted_unfinished_runs.len()
+                        ),
+                    );
+                }
+            }
 
             if let Some(run) = self
                 .active_run_id
@@ -1260,6 +1280,12 @@ impl App {
             }
             RunnerEvent::Error { message } => format!("error: {message}"),
         };
+        tracing::info!(
+            target: "odin_tui::event_trace",
+            stage = %self.last_runner_stage,
+            event = ?event,
+            "TUI received runner event"
+        );
     }
 
     fn update_live_agent_status(
