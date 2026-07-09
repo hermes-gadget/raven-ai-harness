@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/odin-core",
+    "crates/odin-eval",
     "crates/odin-runtime",
     "crates/odin-loop",
     "crates/odin-providers",
@@ -72,6 +73,7 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 
 # Odin internal crates
 odin-core = { path = "crates/odin-core" }
+odin-eval = { path = "crates/odin-eval" }
 odin-runtime = { path = "crates/odin-runtime" }
 odin-loop = { path = "crates/odin-loop" }
 odin-providers = { path = "crates/odin-providers" }
