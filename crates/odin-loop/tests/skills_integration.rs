@@ -106,6 +106,7 @@ async fn test_skills_loaded_and_injected_into_plan_phase() {
         policy_engine: None,
         skill_registry: Some(registry.clone()),
         audit_logger: None,
+        model_profile: None,
     };
 
     let plan_phase = odin_loop::PlanPhase::new(odin_loop::GoalDecomposer::default());

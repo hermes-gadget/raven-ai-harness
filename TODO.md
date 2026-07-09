@@ -2,6 +2,55 @@
 
 > Updated: 2026-07-09 | Workspace version: 0.3.0
 
+## Small-Model Excellence Phase
+
+Only mark these complete after Raven is measured against repeatable baselines, adapts execution to model capability, and docs report which small/local/cheap models work best and why.
+
+### Phase 6 blockers that affect this phase
+
+- [x] Re-audit real persistent orchestration, restart recovery, real status/pause/resume/cancel, scoped sub-agents, MCP startup wiring, and full verification against the current worktree.
+- [x] Fix any blocker from that audit before relying on the small-model eval results. No blocking gaps found in the current audit.
+
+### Eval harness and baselines
+
+- [x] Add a repeatable small-model eval harness.
+- [x] Cover coding, repo edits, debugging, docs, tool use, multi-file work, long context, and failed tool recovery.
+- [x] Compare Raven looped/orchestrated execution against a single-pass baseline on the same tasks.
+- [x] Run mocked evals in CI.
+- [x] Make live provider evals optional and gated by provider keys/config.
+- [x] Produce a scoring dashboard/report with success rate, cost, tokens, iterations, tool errors, time, and escalation rate.
+
+### Small/local model support
+
+- [x] Test Ollama/OpenAI-compatible local model profiles through mocked evals; live provider eval remains opt-in through `raven eval live`.
+- [x] Test small/cheap DeepSeek-compatible profiles through mocked evals; live provider eval remains opt-in through `raven eval live`.
+- [x] Test Qwen and Llama model families through mocked evals where available.
+- [x] Add model profiles for context size, strengths, weaknesses, max tool complexity, preferred prompt style, retry limits, and escalation rules.
+- [x] Document which small models work best and why.
+
+### Adaptive execution
+
+- [x] Keep simple tasks cheap.
+- [x] Escalate hard tasks to decomposition, sub-agents, stronger verifier, or stronger model only when needed.
+- [x] Add retry/escalation rules driven by model profile and failure evidence.
+
+### Small-model prompting and structure
+
+- [x] Improve prompts for small models with short instructions, strict schemas, examples, bounded outputs, and tool-choice hints.
+- [x] Add structured JSON planning/decomposition with validation and fallback.
+- [x] Add tool-use repair that auto-corrects invalid arguments once before retry.
+- [x] Add context distillation into task facts, decisions, files changed, errors, and next action.
+- [x] Add verifier/judge mode that checks real evidence instead of self-confidence only.
+- [x] Add failure taxonomy for model confusion, bad tool args, missing context, permission denied, timeout, and hallucinated file/tool.
+
+### Required gates
+
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo check --workspace --all-targets`
+- [x] `cargo test --workspace --all-targets`
+- [x] `scripts/validate-tools.sh`
+
 ## TUI Responsiveness + Live Agent Feedback Debug
 
 Only mark these items complete after reproducing the stall, tracing the live path, implementing the fix, and verifying current runtime behavior.

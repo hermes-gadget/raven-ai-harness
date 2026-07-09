@@ -96,6 +96,7 @@ MCP tools are treated as unsafe and approval-required by default. A server can o
 | **raven tools test &lt;name&gt; --args &lt;json&gt; --approve** | Explicitly approve direct execution of a dangerous tool |
 | **raven skills list / tools** | Inspect markdown skills and their tool dependencies |
 | **raven providers list** | Show configured providers |
+| **raven eval mocked / profiles / live** | Run deterministic small-model evals, inspect profiles, or check live-eval readiness |
 | **raven tasks**, **raven sessions**, **raven audit replay** | Inspect audit-derived history |
 | **raven config**, **raven status**, **raven version** | Inspect local configuration and build information |
 
@@ -155,6 +156,7 @@ The internal crate boundaries are:
 
 - **odin-core**: shared types, configuration, errors, and traits
 - **odin-loop**: PLAN → ACT → INSPECT → CRITIQUE → REVISE → VERIFY → DECIDE
+- **odin-eval**: deterministic small/local/cheap model evaluation harness and reports
 - **odin-orchestrator**: decomposition, task graphs, sub-agent lifecycle, locks, merge, persistence
 - **odin-runtime**: agents and sessions
 - **odin-providers**: OpenAI-compatible, Anthropic, local, and fallback providers
@@ -194,9 +196,12 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo check --workspace --all-targets
 cargo test --workspace --all-targets
+cargo run -p odin-cli --bin raven -- eval mocked --format json
 cargo bench --no-run
 scripts/validate-tools.sh
 ~~~
+
+Small/local/cheap model evaluation details are in [docs/small-model-evals.md](docs/small-model-evals.md).
 
 ## License
 

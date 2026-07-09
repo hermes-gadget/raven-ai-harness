@@ -114,6 +114,12 @@ enum Commands {
         config: Option<PathBuf>,
     },
 
+    /// Run small/local/cheap model evaluations.
+    Eval {
+        #[command(subcommand)]
+        action: EvalAction,
+    },
+
     /// Manage and list skills.
     Skills {
         #[command(subcommand)]
@@ -229,6 +235,43 @@ enum ProvidersAction {
 }
 
 #[derive(Subcommand, Debug)]
+enum EvalAction {
+    /// Run the deterministic mocked small-model suite.
+    Mocked {
+        /// Built-in model profile ID.
+        #[arg(long, default_value = "ollama-qwen2.5-coder-7b")]
+        profile: String,
+        /// Output format: table or json.
+        #[arg(short, long, default_value = "table")]
+        format: String,
+        /// Optional output file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// List built-in small-model profiles.
+    Profiles {
+        /// Output format: table or json.
+        #[arg(short, long, default_value = "table")]
+        format: String,
+    },
+    /// Check optional live eval readiness for a provider/model.
+    Live {
+        /// Provider name, e.g. ollama, openai_compat, deepseek.
+        #[arg(long)]
+        provider: String,
+        /// Model name to evaluate.
+        #[arg(long)]
+        model: String,
+        /// OpenAI-compatible base URL for local providers.
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Environment variable that contains the provider API key.
+        #[arg(long)]
+        api_key_env: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum SkillsAction {
     /// List available skills.
     List {
@@ -333,6 +376,7 @@ pub async fn run(default_to_ui: bool) -> anyhow::Result<()> {
         Some(Commands::Config { path, edit }) => cmd_config(path, edit),
         Some(Commands::Schedule { action }) => cmd_schedule(action).await,
         Some(Commands::Providers { action, config }) => cmd_providers(action, config).await,
+        Some(Commands::Eval { action }) => cmd_eval(action).await,
         Some(Commands::Skills { action }) => cmd_skills(action).await,
         Some(Commands::Tasks { action }) => cmd_tasks(action).await,
         Some(Commands::Sessions { action }) => cmd_sessions(action).await,
@@ -378,6 +422,7 @@ fn init_tracing(launching_tui: bool) -> anyhow::Result<()> {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(filter)
             .compact()
+            .with_writer(std::io::stderr)
             .try_init();
     }
     Ok(())
@@ -1984,6 +2029,74 @@ async fn cmd_providers(
     Ok(())
 }
 
+/// `raven eval ...` — Run small/local/cheap model evaluations.
+async fn cmd_eval(action: EvalAction) -> anyhow::Result<()> {
+    match action {
+        EvalAction::Mocked {
+            profile,
+            format,
+            output,
+        } => {
+            let profile = odin_loop::SmallModelProfile::by_id(&profile).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Unknown profile '{}'. Run `raven eval profiles` to list built-ins.",
+                    profile
+                )
+            })?;
+            let report = odin_eval::run_mocked_eval(profile).await?;
+            let rendered = render_eval_output(&format, &report)?;
+
+            if let Some(path) = output {
+                std::fs::write(&path, rendered)?;
+                println!("Wrote eval report to {}", path.display());
+            } else {
+                println!("{rendered}");
+            }
+        }
+        EvalAction::Profiles { format } => {
+            let profiles = odin_loop::SmallModelProfile::built_ins();
+            let rendered = match format.as_str() {
+                "table" | "markdown" => odin_eval::render_profiles_table(&profiles),
+                "json" => serde_json::to_string_pretty(&profiles)?,
+                other => anyhow::bail!("Unsupported eval profile format '{other}'"),
+            };
+            println!("{rendered}");
+        }
+        EvalAction::Live {
+            provider,
+            model,
+            base_url,
+            api_key_env,
+        } => {
+            let config = odin_eval::LiveEvalConfig {
+                provider,
+                model,
+                base_url,
+                api_key_env,
+            };
+            let readiness = odin_eval::check_live_eval_readiness(&config);
+            if readiness.ready {
+                println!("Live eval readiness: ready — {}", readiness.reason);
+                println!(
+                    "Live provider execution is opt-in; use this readiness gate before running provider-backed eval jobs."
+                );
+            } else {
+                anyhow::bail!("Live eval is not configured: {}", readiness.reason);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn render_eval_output(format: &str, report: &odin_eval::EvalReport) -> anyhow::Result<String> {
+    match format {
+        "table" | "markdown" => Ok(odin_eval::render_report_table(report)),
+        "json" => Ok(serde_json::to_string_pretty(report)?),
+        other => anyhow::bail!("Unsupported eval report format '{other}'"),
+    }
+}
+
 /// `raven skills list` — List available skills.
 async fn cmd_skills(action: SkillsAction) -> anyhow::Result<()> {
     match action {
@@ -3028,6 +3141,34 @@ mod tests {
     fn test_cli_parses_providers_list() {
         let cli = Cli::parse_from(["raven", "providers", "list"]);
         assert!(matches!(cli.command, Some(Commands::Providers { .. })));
+    }
+
+    #[test]
+    fn test_cli_parses_eval_mocked() {
+        let cli = Cli::parse_from(["raven", "eval", "mocked", "--format", "json"]);
+        assert!(matches!(cli.command, Some(Commands::Eval { .. })));
+    }
+
+    #[test]
+    fn test_cli_parses_eval_profiles() {
+        let cli = Cli::parse_from(["raven", "eval", "profiles"]);
+        assert!(matches!(cli.command, Some(Commands::Eval { .. })));
+    }
+
+    #[test]
+    fn test_cli_parses_eval_live() {
+        let cli = Cli::parse_from([
+            "raven",
+            "eval",
+            "live",
+            "--provider",
+            "ollama",
+            "--model",
+            "qwen2.5-coder:7b",
+            "--base-url",
+            "http://localhost:11434/v1",
+        ]);
+        assert!(matches!(cli.command, Some(Commands::Eval { .. })));
     }
 
     #[test]

@@ -1613,6 +1613,7 @@ dependencies = [
  "clap",
  "odin-audit",
  "odin-core",
+ "odin-eval",
  "odin-gateway",
  "odin-loop",
  "odin-mcp",
@@ -1651,6 +1652,18 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "odin-eval"
+version = "0.3.0"
+dependencies = [
+ "chrono",
+ "odin-core",
+ "odin-loop",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

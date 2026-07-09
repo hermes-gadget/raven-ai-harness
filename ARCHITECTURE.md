@@ -40,6 +40,7 @@ Without a provider, the loop uses deterministic heuristic behavior for tests and
 | odin-core | Shared types, YAML configuration, errors, and traits |
 | odin-cli | Shared command implementation plus raven and legacy odin entry points |
 | odin-loop | Seven-phase model loop, tool dispatch, policy enforcement, skills, and audit hooks |
+| odin-eval | Deterministic small-model eval suite, model-profile reports, and live-eval readiness gates |
 | odin-orchestrator | Goal decomposition, graphs, sub-agent state, locks, merge, and SQLite persistence |
 | odin-runtime | Agents, sessions, and memory-backed task submission |
 | odin-providers | OpenAI-compatible, Anthropic, local, fallback, health, and circuit-breaker providers |

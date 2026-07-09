@@ -78,6 +78,7 @@ async fn test_skills_injected_via_loop_engine() {
         policy_engine: None,
         skill_registry: Some(registry.clone()),
         audit_logger: None,
+        model_profile: None,
     };
 
     let plan_phase = PlanPhase::new(GoalDecomposer::default());

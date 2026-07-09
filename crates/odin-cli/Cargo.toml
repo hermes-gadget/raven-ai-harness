@@ -17,6 +17,7 @@ path = "src/bin/odin.rs"
 
 [dependencies]
 odin-core.workspace = true
+odin-eval.workspace = true
 odin-permissions = { path = "../odin-permissions" }
 odin-runtime.workspace = true
 odin-gateway = { workspace = true }

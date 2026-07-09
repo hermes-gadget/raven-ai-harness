@@ -13,7 +13,11 @@ use odin_permissions::SecretRedactor;
 use std::sync::Arc;
 
 use crate::confidence::ConfidenceScorer;
-use crate::decomposer::{DecomposedPlan, Dependency, GoalDecomposer};
+use crate::decomposer::{DecomposedPlan, GoalDecomposer};
+use crate::small_model::{
+    SmallModelProfile, parse_plan_response, repair_tool_argument_value, repair_tool_arguments_once,
+    verify_evidence,
+};
 use crate::summarizer::StateSummarizer;
 
 // ── Phase Traits ────────────────────────────────────────────────────
@@ -49,6 +53,8 @@ pub struct PhaseContext {
     pub skill_registry: Option<Arc<odin_skills::SkillRegistry>>,
     /// Optional audit logger for recording tool calls and events
     pub audit_logger: Option<Arc<dyn AuditLogger>>,
+    /// Optional small/local model profile for bounded prompts and retries
+    pub model_profile: Option<SmallModelProfile>,
 }
 
 // ── Plan Phase ──────────────────────────────────────────────────────
@@ -109,7 +115,15 @@ impl Phase for PlanPhase {
 
         // Try LLM-based decomposition if a provider is available
         let plan = if let Some(ref provider) = context.provider {
-            let prompt = "Break this goal into sub-tasks. List each sub-task as a separate line starting with '- '. Keep descriptions concise and actionable.";
+            let prompt = context.model_profile.as_ref().map_or_else(
+                || {
+                    "Break this goal into sub-tasks. Prefer JSON with \
+                     {\"sub_tasks\":[{\"id\":\"task_1\",\"description\":\"short action\"}]}; \
+                     if you cannot, list each sub-task as '- '. Keep descriptions concise and actionable."
+                        .to_string()
+                },
+                SmallModelProfile::plan_prompt,
+            );
             let mut msgs = state.messages.clone();
             msgs.push(Message::user(prompt));
             match provider
@@ -124,40 +138,15 @@ impl Phase for PlanPhase {
                 Ok(response) => {
                     let text = response.message.text().unwrap_or("").to_string();
                     tracing::info!("[PLAN] LLM decomposition response received");
-                    // Parse sub-tasks from the LLM response
-                    let sub_tasks: Vec<SubTask> = text
-                        .lines()
-                        .filter(|line| line.trim().starts_with("- "))
-                        .enumerate()
-                        .map(|(i, line)| SubTask {
-                            id: format!("sub_{}", i + 1),
-                            description: line.trim().trim_start_matches("- ").to_string(),
-                            status: SubTaskStatus::Pending,
-                            result: None,
-                        })
-                        .collect();
-
-                    if sub_tasks.is_empty() {
+                    if let Some(plan) =
+                        parse_plan_response(&state.task.goal, &text, self.decomposer.max_sub_tasks)
+                    {
+                        plan
+                    } else {
                         tracing::warn!(
                             "[PLAN] LLM returned no parseable sub-tasks, falling back to heuristic"
                         );
                         self.decomposer.decompose_heuristic(&state.task.goal)
-                    } else {
-                        // Build sequential dependencies
-                        let dependencies: Vec<Dependency> = sub_tasks
-                            .windows(2)
-                            .map(|pair| Dependency {
-                                from: pair[0].id.clone(),
-                                to: pair[1].id.clone(),
-                                reason: "Sequential order".into(),
-                            })
-                            .collect();
-
-                        DecomposedPlan {
-                            goal: state.task.goal.clone(),
-                            sub_tasks,
-                            dependencies,
-                        }
                     }
                 }
                 Err(_error) => {
@@ -236,9 +225,14 @@ impl Phase for ActPhase {
                 .map(|st| st.description.as_str())
                 .unwrap_or("the current goal");
 
-            let prompt = format!(
-                "You are working on: {}\nGoal: {}\nDecide what action to take next. If you need a tool, specify which one. Otherwise, provide the result.",
-                pending_desc, state.task.goal
+            let prompt = context.model_profile.as_ref().map_or_else(
+                || {
+                    format!(
+                        "You are working on: {}\nGoal: {}\nDecide what action to take next. If you need a tool, specify which one. Otherwise, provide the result.",
+                        pending_desc, state.task.goal
+                    )
+                },
+                |profile| profile.action_prompt(pending_desc, &state.task.goal),
             );
 
             let mut msgs = state.messages.clone();
@@ -295,21 +289,71 @@ impl Phase for ActPhase {
                                     }
                                 };
 
+                                let schema = tool.schema();
                                 let args: serde_json::Value =
                                     match serde_json::from_str(&tc.function.arguments) {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            let tr = ToolResult {
-                                                call_id: tc.id.clone(),
-                                                tool_name: tool_name.clone(),
-                                                success: false,
-                                                output: String::new(),
-                                                error: Some(format!("Invalid tool args: {}", e)),
-                                                duration_ms: 0,
-                                                timestamp: chrono::Utc::now(),
-                                            };
-                                            results.push(tr);
-                                            continue;
+                                        Ok(value) => match tool.validate_args(&value) {
+                                            Ok(()) => value,
+                                            Err(validation_error) => {
+                                                match repair_tool_argument_value(
+                                                    &tool_name, value, &schema,
+                                                ) {
+                                                    Some(repair)
+                                                        if tool
+                                                            .validate_args(&repair.args)
+                                                            .is_ok() =>
+                                                    {
+                                                        tracing::info!(
+                                                            tool = %tool_name,
+                                                            reason = %repair.reason,
+                                                            "[ACT] Repaired parsed tool arguments"
+                                                        );
+                                                        repair.args
+                                                    }
+                                                    _ => {
+                                                        let tr = tool_arg_error_result(
+                                                            &tc,
+                                                            &tool_name,
+                                                            format!(
+                                                                "Invalid tool args: {}",
+                                                                validation_error
+                                                            ),
+                                                        );
+                                                        results.push(tr);
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        Err(parse_error) => {
+                                            match repair_tool_arguments_once(
+                                                &tool_name,
+                                                &tc.function.arguments,
+                                                &schema,
+                                            ) {
+                                                Some(repair)
+                                                    if tool.validate_args(&repair.args).is_ok() =>
+                                                {
+                                                    tracing::info!(
+                                                        tool = %tool_name,
+                                                        reason = %repair.reason,
+                                                        "[ACT] Repaired malformed tool arguments"
+                                                    );
+                                                    repair.args
+                                                }
+                                                _ => {
+                                                    let tr = tool_arg_error_result(
+                                                        &tc,
+                                                        &tool_name,
+                                                        format!(
+                                                            "Invalid tool args: {}",
+                                                            parse_error
+                                                        ),
+                                                    );
+                                                    results.push(tr);
+                                                    continue;
+                                                }
+                                            }
                                         }
                                     };
 
@@ -587,17 +631,21 @@ impl Phase for InspectPhase {
     async fn execute(
         &self,
         state: &mut LoopState,
-        _context: &PhaseContext,
+        context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
         tracing::info!("[INSPECT] Inspecting results of action");
 
         state.current_phase = LoopPhase::Inspect;
 
         // Check context window
-        let needs_compression = self.summarizer.needs_compression(
-            &state.messages,
-            32768, // Default context limit; use config in production
-        );
+        let context_limit = context
+            .model_profile
+            .as_ref()
+            .map(|profile| profile.context_tokens)
+            .unwrap_or(32_768);
+        let needs_compression = self
+            .summarizer
+            .needs_compression(&state.messages, context_limit);
 
         if needs_compression {
             tracing::info!("[INSPECT] Context window nearing limit, compressing...");
@@ -731,9 +779,15 @@ impl Phase for CritiquePhase {
             fallback_critique_confidence(state, &self.scorer)
         };
 
+        let retry_limit = context
+            .model_profile
+            .as_ref()
+            .map(|profile| profile.retry_limit)
+            .unwrap_or(2);
+
         let decision = if confidence.is_high() {
             LoopDecision::Continue
-        } else if confidence.is_low() && state.retry_count >= 2 {
+        } else if confidence.is_low() && state.retry_count >= retry_limit {
             LoopDecision::Escalate
         } else if confidence.is_low() {
             LoopDecision::Retry
@@ -841,7 +895,13 @@ impl Phase for RevisePhase {
             strategy, state.retry_count
         )));
 
-        let decision = if state.retry_count >= 3 {
+        let retry_limit = context
+            .model_profile
+            .as_ref()
+            .map(|profile| profile.retry_limit)
+            .unwrap_or(3);
+
+        let decision = if state.retry_count >= retry_limit {
             LoopDecision::Escalate
         } else {
             LoopDecision::Retry
@@ -900,7 +960,7 @@ impl Phase for VerifyPhase {
         });
 
         // Try LLM-based verification if a provider is available
-        let (verification, confidence) = if let Some(ref provider) = context.provider {
+        let (mut verification, mut confidence) = if let Some(ref provider) = context.provider {
             let criteria_summary = if state.task.success_criteria.is_empty() {
                 "No specific success criteria defined.".to_string()
             } else {
@@ -1012,6 +1072,24 @@ impl Phase for VerifyPhase {
             (verification, conf)
         };
 
+        if context.model_profile.is_some()
+            && (!state.task.success_criteria.is_empty() || !state.tool_results.is_empty())
+        {
+            let evidence = verify_evidence(state, &state.task.success_criteria);
+            if !evidence.verified {
+                confidence = ConfidenceScore::new(confidence.value().min(evidence.confidence));
+                verification.push_str(&format!(
+                    "\nEvidence missing: {}",
+                    evidence.missing.join(", ")
+                ));
+            } else if !evidence.evidence.is_empty() {
+                verification.push_str(&format!(
+                    "\nEvidence checked: {}",
+                    evidence.evidence.join(", ")
+                ));
+            }
+        }
+
         let record = PhaseRecord {
             phase: LoopPhase::Verify,
             input: Some("Verify results".into()),
@@ -1089,8 +1167,14 @@ impl Phase for DecidePhase {
             .find(|r| r.confidence.is_some())
             .and_then(|r| r.confidence);
 
+        let retry_limit = context
+            .model_profile
+            .as_ref()
+            .map(|profile| profile.retry_limit)
+            .unwrap_or(2);
+
         let decision = match last_confidence {
-            Some(c) if c.is_low() && state.retry_count >= 2 => LoopDecision::Escalate,
+            Some(c) if c.is_low() && state.retry_count >= retry_limit => LoopDecision::Escalate,
             Some(c) if c.is_low() => LoopDecision::Retry,
             _ => LoopDecision::Continue,
         };
@@ -1119,6 +1203,18 @@ impl Phase for DecidePhase {
 }
 
 // ── Helper Functions ──────────────────────────────────────────────────
+
+fn tool_arg_error_result(tc: &ToolCall, tool_name: &str, error: String) -> ToolResult {
+    ToolResult {
+        call_id: tc.id.clone(),
+        tool_name: tool_name.to_string(),
+        success: false,
+        output: String::new(),
+        error: Some(error),
+        duration_ms: 0,
+        timestamp: chrono::Utc::now(),
+    }
+}
 
 /// Parse a confidence score (0.0–1.0) from LLM response text.
 ///

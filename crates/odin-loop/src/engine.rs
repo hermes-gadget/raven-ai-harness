@@ -13,11 +13,12 @@ use odin_core::types::*;
 use std::sync::Arc;
 
 use crate::confidence::ConfidenceScorer;
-use crate::decomposer::GoalDecomposer;
+use crate::decomposer::{DecomposedPlan, Dependency, GoalDecomposer};
 use crate::phases::{
     ActPhase, CritiquePhase, DecidePhase, InspectPhase, Phase, PhaseContext, PlanPhase,
     RevisePhase, VerifyPhase,
 };
+use crate::small_model::SmallModelProfile;
 use crate::summarizer::StateSummarizer;
 
 /// The main loop engine implementation.
@@ -44,6 +45,8 @@ pub struct Engine {
     audit_logger: Option<Arc<dyn AuditLogger>>,
     /// Model name to pass to the provider (e.g., "deepseek-v4-pro", "gpt-4o")
     model_name: String,
+    /// Optional small/local model profile used to bound prompts, retries, and context.
+    model_profile: Option<SmallModelProfile>,
 }
 
 impl Engine {
@@ -61,6 +64,7 @@ impl Engine {
             skill_registry: None,
             audit_logger: None,
             model_name: String::new(),
+            model_profile: None,
         }
     }
 
@@ -73,6 +77,12 @@ impl Engine {
     /// Set the model name to use for LLM calls (e.g., "deepseek-v4-pro").
     pub fn with_model_name(mut self, name: impl Into<String>) -> Self {
         self.model_name = name.into();
+        self
+    }
+
+    /// Attach a small/local model profile for adaptive prompting and retries.
+    pub fn with_small_model_profile(mut self, profile: SmallModelProfile) -> Self {
+        self.model_profile = Some(profile);
         self
     }
 
@@ -146,7 +156,12 @@ impl LoopEngineTrait for Engine {
             task: task.clone(),
             messages: vec![
                 Message::system(
-                    "You are an AI agent. Follow the plan, execute carefully, and verify results.",
+                    self.model_profile
+                        .as_ref()
+                        .map(SmallModelProfile::system_instruction)
+                        .unwrap_or_else(|| {
+                            "You are an AI agent. Follow the plan, execute carefully, and verify results.".into()
+                        }),
                 ),
                 Message::user(format!("Goal: {}", task.goal)),
             ],
@@ -187,6 +202,7 @@ impl LoopEngineTrait for Engine {
             policy_engine: self.policy_engine.clone(),
             skill_registry: self.skill_registry.clone(),
             audit_logger: self.audit_logger.clone(),
+            model_profile: self.model_profile.clone(),
         };
 
         let mut total_tool_calls = 0u32;
@@ -204,6 +220,8 @@ impl LoopEngineTrait for Engine {
             // ── PLAN ── (only on first iteration — decomposition is done once)
             if state.iteration == 1 {
                 let result = plan_phase.execute(&mut state, &context).await?;
+                plan = plan_from_state(&state.task.goal, &state.task.sub_tasks);
+                context.plan = Some(plan.clone());
                 last_confidence = result.confidence;
                 if result.decision == LoopDecision::Stop {
                     break;
@@ -348,6 +366,7 @@ impl LoopEngineTrait for Engine {
             policy_engine: self.policy_engine.clone(),
             skill_registry: self.skill_registry.clone(),
             audit_logger: self.audit_logger.clone(),
+            model_profile: self.model_profile.clone(),
         };
 
         match phase {
@@ -393,6 +412,24 @@ impl LoopEngineTrait for Engine {
 
     fn confidence(&self) -> ConfidenceScore {
         ConfidenceScore::new(0.5)
+    }
+}
+
+fn plan_from_state(goal: &str, sub_tasks: &[SubTask]) -> DecomposedPlan {
+    let sub_tasks = sub_tasks.to_vec();
+    let dependencies = sub_tasks
+        .windows(2)
+        .map(|pair| Dependency {
+            from: pair[0].id.clone(),
+            to: pair[1].id.clone(),
+            reason: "Sequential order".into(),
+        })
+        .collect();
+
+    DecomposedPlan {
+        goal: goal.to_string(),
+        sub_tasks,
+        dependencies,
     }
 }
 
