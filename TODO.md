@@ -2,6 +2,43 @@
 
 > Updated: 2026-07-09 | Workspace version: 0.3.0
 
+## TUI Live Execution Bugfix
+
+Treat this as complete only after reproducing the current TUI behavior from `raven`, tracing the real submit → orchestration → event → render path, and verifying visible live progress under failure and slow-provider cases.
+
+### Required debug
+
+- [x] Run `raven`.
+- [x] Start a real task from the TUI.
+- [x] Trace input box → submit handler → orchestration run created → sub-agents spawned → provider/tool calls → events emitted → TUI receives events → render update.
+- [x] Identify where live progress can stop or confirm the current path is wired end-to-end.
+- [x] Add or verify logging/event tracing at every stage.
+
+### Required fixes
+
+- [x] No silent task starts; within 1 second the UI shows a run ID and status.
+- [x] Chat panel immediately shows submitted, planning, decomposing, spawning agents, running, waiting for model/tool/lock/approval, failed, and done states.
+- [x] Side panel shows live sub-agents, current task, lifecycle state, elapsed time, current tool/model call, locks, queued writes, and last event.
+- [x] Provider calls over 10 seconds show `waiting for model...` with elapsed timer.
+- [x] No event for 15 seconds shows a `no events received` warning with last known stage.
+- [x] Orchestration startup failures show the real UI error.
+- [x] TUI is connected to the real orchestrator/event bus, not mock/static state except in tests.
+- [x] User interrupt/cancel targets the active run.
+
+### Tests
+
+- [x] Fake slow provider test proves UI keeps updating.
+- [x] TUI submit → run created → planning event → agent event → completion event.
+- [x] Provider unavailable shows visible error.
+- [x] Cancel works during model wait.
+- [x] Five unrelated tasks show five agents in the side panel.
+
+### Definition of done
+
+- [x] Starting a task in `raven` always shows visible progress within 1 second.
+- [x] TUI streams real orchestration events and shows agents working.
+- [x] TUI surfaces blockers/errors instead of leaving a dead screen.
+
 ## Small-Model Excellence Phase
 
 Only mark these complete after Raven is measured against repeatable baselines, adapts execution to model capability, and docs report which small/local/cheap models work best and why.
