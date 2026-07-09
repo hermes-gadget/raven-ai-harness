@@ -1,140 +1,56 @@
-# =============================================================================
-# Raven Agent — Full Configuration Example
-# =============================================================================
-# This file documents every configuration option supported by the Odin config
-# system. Copy this to ~/.odin/config.yaml (or odin.yaml/odin.yml in the
-# working directory) and adjust values as needed.
+# Raven Agent 0.3.0 configuration reference.
+# Copy to ~/.config/raven/config.yaml. Legacy ~/.odin/config.yaml and
+# ODIN_CONFIG are read as compatibility fallbacks.
 
 general:
-  # Human-readable name for this instance (default: "odin")
   instance_name: raven
-
-  # Directory for Odin data (defaults to ~/.odin)
-  # data_dir: /var/lib/odin
-
-  # Log level: trace, debug, info, warn, error (default: "info")
+  # Defaults to ~/.raven-agent when omitted.
+  data_dir: ~/.raven-agent
   log_level: info
-
-  # Enable debug mode (default: false)
   debug: false
 
-# =============================================================================
-# Model Provider Configuration
-# =============================================================================
 models:
-  # Default provider name to use (default: "openai_compat")
-  default_provider: openai_compat
-
-  # Default model for the primary provider
-  default_model: gpt-4o-mini
-
-  # Model used for the planning phase (can be a cheaper/smaller model)
-  planning_model: gpt-4o-mini
-
-  # Model used for critique/self-check (can be the same or different)
-  critique_model: gpt-4o-mini
-
-  # Stronger model for escalation when confidence is low
-  escalation_model: gpt-4o
-
-  # Provider-specific configurations
+  default_provider: local
+  default_model: qwen2.5-coder
+  planning_model: qwen2.5-coder
+  critique_model: qwen2.5-coder
+  # escalation_model: stronger-model
   providers:
-    # OpenAI-compatible provider (works with OpenAI, Ollama, vLLM, Groq, DeepSeek, etc.)
-    openai_compat:
-      provider_type: openai_compat
-      base_url: https://api.openai.com/v1
-      api_key_env: OPENAI_API_KEY
-      default_model: gpt-4o-mini
-      # Extra HTTP headers (optional)
-      headers: {}
-      # Request timeout in seconds (default: 120)
-      timeout_secs: 120
-      # Max retries for transient failures (default: 3)
-      max_retries: 3
-      # Fallback chain: provider names to try in order if this one fails
-      fallback_chain:
-        - anthropic
-        - local
-      # Periodic health check interval in seconds (0 = disabled)
-      health_check_interval_secs: 30
-      # Consecutive failures before circuit breaker opens (0 = disabled)
-      circuit_breaker_threshold: 3
-
-    # Anthropic provider
-    anthropic:
-      provider_type: anthropic
-      api_key_env: ANTHROPIC_API_KEY
-      default_model: claude-sonnet-4-20250514
-      headers: {}
-      timeout_secs: 120
-      max_retries: 3
-
-    # Local model (Ollama / llama.cpp compatible)
     local:
       provider_type: openai_compat
       base_url: http://localhost:11434/v1
-      default_model: llama3.2
-      headers: {}
-      timeout_secs: 60
-      max_retries: 2
-
-    # Example: Groq via OpenAI-compatible endpoint
-    groq:
-      provider_type: openai_compat
-      base_url: https://api.groq.com/openai/v1
-      api_key_env: GROQ_API_KEY
-      default_model: llama-3.3-70b-versatile
-      headers: {}
-      timeout_secs: 30
-      max_retries: 3
-
-    # Example: DeepSeek via OpenAI-compatible endpoint
-    deepseek:
-      provider_type: openai_compat
-      base_url: https://api.deepseek.com/v1
-      api_key_env: DEEPSEEK_API_KEY
-      default_model: deepseek-chat
+      default_model: qwen2.5-coder
       headers: {}
       timeout_secs: 120
       max_retries: 3
+      fallback_chain: []
+      health_check_interval_secs: 0
+      circuit_breaker_threshold: 0
 
-# =============================================================================
-# Agent Loop Configuration
-# =============================================================================
+    # hosted:
+    #   provider_type: openai_compat
+    #   base_url: https://api.example.com/v1
+    #   api_key_env: HOSTED_PROVIDER_API_KEY
+    #   default_model: model-name
+    #   headers: {}
+    #   timeout_secs: 120
+    #   max_retries: 3
+    #   fallback_chain: [local]
+    #   health_check_interval_secs: 30
+    #   circuit_breaker_threshold: 3
+
 agent:
-  # Maximum loop iterations per task (default: 100)
   max_iterations: 100
-
-  # Maximum tool calls per turn (default: 10)
   max_tool_calls_per_turn: 10
-
-  # Confidence threshold (0.0–1.0); below this triggers escalation (default: 0.5)
   confidence_threshold: 0.5
-
-  # Max retries for a single action (default: 3)
   max_retries: 3
-
-  # Enable goal decomposition for complex tasks (default: true)
   enable_decomposition: true
-
-  # Enable state summarization for context management (default: true)
   enable_summarization: true
-
-  # Token limit before triggering context compression (default: 32768)
   context_limit: 32768
-
-  # Compress context to this ratio of the limit (default: 0.5)
   compression_ratio: 0.5
+  skills_dir: ~/.config/raven/skills
 
-  # Directory for markdown skills (default: "skills")
-  # Skills are .md files with YAML frontmatter loaded by the skill registry
-  skills_dir: ~/.odin/skills
-
-# =============================================================================
-# Tool Configuration
-# =============================================================================
 tools:
-  # Enabled tool names
   enabled:
     - file_read
     - file_write
@@ -142,135 +58,72 @@ tools:
     - web_search
     - web_fetch
     - git
-
-  # Disabled tool names (overrides enabled list)
+  # Disabled names override enabled names. Discovered MCP tool names can also
+  # be disabled here.
   disabled: []
-
-  # Default timeout for tool execution in seconds (default: 60)
   default_timeout_secs: 60
-
-  # Filesystem boundary for tool execution
   path_boundary:
-    allowed_read:
-      - "."
-    allowed_write:
-      - "."
+    allowed_read: ["."]
+    allowed_write: ["."]
     denied:
-      - /etc/passwd
-      - /etc/shadow
+      - .git
+      - .env
       - ~/.ssh
-
-  # Enable sandboxing (container/chroot) — default: false
   sandbox_enabled: false
-
-  # Custom tool directories to scan for additional tools
   tool_dirs: []
 
-# =============================================================================
-# Memory Configuration
-# =============================================================================
+  # External MCP tools fail closed by default.
+  mcp_servers:
+    # - name: filesystem
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    #   transport_type: stdio
+    #   env: {}
+    #   enabled: true
+    #   tags: [mcp, external, dangerous]
+    #   requires_approval: true
+    #   safe: false
+
 memory:
-  # Enable persistent memory (default: true)
   enabled: true
-
-  # Database path (SQLite); defaults to ~/.odin/memory.db
-  # db_path: /var/lib/odin/memory.db
-
-  # Maximum entries in working memory (default: 1000)
+  db_path: ~/.raven-agent/memory.db
   max_entries: 1000
-
-  # Auto-save interval in seconds (default: 300)
   save_interval_secs: 300
 
-# =============================================================================
-# Safety & Permissions Configuration
-# =============================================================================
 safety:
-  # Enable command approval prompts for dangerous commands (default: true)
+  # Approval-required model tool calls fail closed because 0.3.0 has no
+  # interactive approval responder in the loop.
   require_approval: true
-
-  # Commands that always require approval (regex patterns)
   dangerous_commands:
-    - rm\s+-rf
-    - git\s+reset\s+--hard
-    - git\s+push\s+--force
-    - sudo\s+
-    - chmod\s+777
+    - 'rm\s+-rf'
+    - 'git\s+reset\s+--hard'
+    - 'git\s+push\s+--force'
+    - 'sudo\s+'
+    - 'chmod\s+777'
     - '>\s*/dev/'
-    - mkfs\.
-    - dd\s+if=
-
-  # Maximum rate of tool calls per minute (default: 60)
+    - 'mkfs\.'
+    - 'dd\s+if='
   max_rate_per_minute: 60
-
-  # Custom permission rules (tool-level allow/deny/ask-user)
   permissions:
     - tool_name: shell
       action: ask_user
+      require_approval: true
       max_rate_per_minute: 10
-    # - tool_name: file_write
-    #   action: allow
-    #   max_rate_per_minute: 30
 
-# =============================================================================
-# Audit / Logging Configuration
-# =============================================================================
 audit:
-  # Enable audit logging (default: true)
   enabled: true
+  log_path: ~/.raven-agent/audit.jsonl
+  json_format: true
 
-  # Log file path (defaults to ~/.odin/audit.log)
-  # log_path: /var/log/odin/audit.log
-
-  # Log in JSON format (default: false)
-  json_format: false
-
-# =============================================================================
-# Gateway / Interface Configuration
-# =============================================================================
 gateway:
-  # Enable the HTTP API server (default: false)
   http_enabled: false
-
-  # HTTP API listen address (default: "127.0.0.1:9177")
   http_addr: 127.0.0.1:9177
-
-  # Enable Discord bot integration (default: false)
   discord_enabled: false
-
-  # Discord bot token (set directly or via env var)
-  # discord_token: your_bot_token_here
+  # discord_token: direct-value-is-discouraged
   discord_token_env: DISCORD_BOT_TOKEN
 
-  # Role name required for privileged commands (e.g., "Odin Admin")
-  # Leave empty to allow anyone
-  discord_admin_role: ""
-
-  # Enable WebSocket gateway (default: false)
-  ws_enabled: false
-
-  # WebSocket listen address
-  ws_addr: 127.0.0.1:9178
-
-  # Max WebSocket connections
-  ws_max_connections: 100
-
-  # WebSocket ping interval in seconds
-  ws_ping_interval_secs: 30
-
-# =============================================================================
-# Scheduler Configuration
-# =============================================================================
 scheduler:
-  # Enable the scheduler (default: false)
   enabled: false
-
-  # Check interval in seconds (default: 30)
   check_interval_secs: 30
-
-  # Max concurrent jobs (default: 5)
   max_concurrent: 5
-
-  # SQLite database path for job persistence (default: ~/.odin/scheduler.db)
-  # If not set, jobs are stored in the shared memory.db
-  # db_path: ~/.odin/scheduler.db
+  db_path: ~/.raven-agent/scheduler.db

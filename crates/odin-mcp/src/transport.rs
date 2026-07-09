@@ -39,6 +39,8 @@ pub struct StdioTransport {
     command: String,
     /// Arguments to the command.
     args: Vec<String>,
+    /// Environment variables added to the child process.
+    env: std::collections::HashMap<String, String>,
 }
 
 impl StdioTransport {
@@ -52,13 +54,21 @@ impl StdioTransport {
             request_id: AtomicU64::new(1),
             command: command.into(),
             args,
+            env: std::collections::HashMap::new(),
         }
+    }
+
+    /// Add configured environment variables to the MCP child process.
+    pub fn with_env(mut self, env: std::collections::HashMap<String, String>) -> Self {
+        self.env = env;
+        self
     }
 
     /// Spawn the child process and open communication channels.
     pub async fn connect(&self) -> McpResult<()> {
         let mut child = Command::new(&self.command)
             .args(&self.args)
+            .envs(&self.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -70,6 +70,9 @@ pub struct TaskEdge {
 /// The task graph — a DAG of work units.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskGraph {
+    /// Stable identifier used by persistence and external APIs.
+    #[serde(default = "default_graph_id")]
+    pub id: Uuid,
     /// All nodes in the graph.
     pub nodes: HashMap<NodeId, TaskNode>,
     /// All edges (dependencies).
@@ -89,6 +92,8 @@ pub enum TaskGraphStatus {
     Building,
     /// Execution in progress.
     Running,
+    /// Execution is intentionally paused.
+    Paused,
     /// All nodes complete.
     Complete,
     /// Some nodes failed, graph aborted.
@@ -101,6 +106,7 @@ impl TaskGraph {
     /// Create a new empty task graph for a root goal.
     pub fn new(root_goal: impl Into<String>) -> Self {
         Self {
+            id: Uuid::new_v4(),
             nodes: HashMap::new(),
             edges: Vec::new(),
             root_goal: root_goal.into(),
@@ -311,6 +317,10 @@ impl TaskGraph {
             failed,
         }
     }
+}
+
+fn default_graph_id() -> Uuid {
+    Uuid::new_v4()
 }
 
 /// Summary of a task graph's current state.

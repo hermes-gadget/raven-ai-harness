@@ -279,7 +279,7 @@ mod tests {
         // Write
         let write_args = serde_json::json!({
             "path": test_path.to_string_lossy(),
-            "content": "Hello, Odin!"
+            "content": "Hello, Raven!"
         });
         let write_result = write.execute(write_args, &test_context()).await.unwrap();
         assert!(write_result.success);
@@ -291,7 +291,7 @@ mod tests {
         });
         let read_result = read.execute(read_args, &test_context()).await.unwrap();
         assert!(read_result.success);
-        assert_eq!(read_result.output, "Hello, Odin!");
+        assert_eq!(read_result.output, "Hello, Raven!");
 
         // Cleanup
         std::fs::remove_file(&test_path).ok();

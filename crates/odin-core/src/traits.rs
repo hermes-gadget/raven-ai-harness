@@ -1,4 +1,4 @@
-//! Core traits for the Odin harness.
+//! Core traits for Raven Agent.
 //!
 //! These traits define the contracts between crates, enabling
 //! loose coupling and testability through mocking.

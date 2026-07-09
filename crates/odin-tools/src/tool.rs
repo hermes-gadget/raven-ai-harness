@@ -31,6 +31,11 @@ impl ToolRegistry {
     ///
     /// Returns an error if a tool with the same name is already registered.
     pub fn register(&self, tool: Box<dyn Tool>) -> OdinResult<()> {
+        self.register_arc(Arc::from(tool))
+    }
+
+    /// Register an already shared tool handle.
+    pub fn register_arc(&self, tool: Arc<dyn Tool>) -> OdinResult<()> {
         let name = tool.name().to_string();
         let mut tools = self
             .tools
@@ -45,9 +50,21 @@ impl ToolRegistry {
             });
         }
 
-        let arc: Arc<dyn Tool> = Arc::from(tool);
-        tools.insert(name, arc);
+        tools.insert(name, tool);
         Ok(())
+    }
+
+    /// Build a registry restricted to the supplied names.
+    /// An empty allow-list intentionally retains all tools for backward
+    /// compatibility with sub-agent configurations created before scoping.
+    pub fn scoped(&self, allowed: &[String]) -> OdinResult<Self> {
+        let scoped = Self::new();
+        for tool in self.all_tools() {
+            if allowed.is_empty() || allowed.iter().any(|name| name == tool.name()) {
+                scoped.register_arc(tool)?;
+            }
+        }
+        Ok(scoped)
     }
 
     /// Get a registered tool by name.
@@ -273,5 +290,16 @@ mod tests {
     async fn test_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<ToolRegistry>();
+    }
+
+    #[test]
+    fn test_scoped_registry_enforces_allow_list() {
+        let registry = ToolRegistry::new();
+        registry.register(Box::new(EchoTool::new("alpha"))).unwrap();
+        registry.register(Box::new(EchoTool::new("beta"))).unwrap();
+
+        let scoped = registry.scoped(&["alpha".to_string()]).unwrap();
+        assert!(scoped.is_registered("alpha"));
+        assert!(!scoped.is_registered("beta"));
     }
 }

@@ -1,4 +1,4 @@
-//! odin-permissions — Safety permissions and security for the Odin harness.
+//! `odin-permissions` — safety permissions and redaction for Raven Agent.
 //!
 //! Provides a complete permission system including:
 //! - [`PolicyEngine`]: Evaluates tool calls and commands against allow/deny rules

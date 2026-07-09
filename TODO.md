@@ -1,490 +1,181 @@
-# Raven Agent — TODO & Implementation Status
-
-> Updated: 2026-07-08 | Build: 0 errors | Tests: 350+ | Workspace: 16 crates green
-> **Honest assessment**: v0.3 has the correct architecture (odin-orchestrator crate, 75 tests, CLI command group, HTTP endpoints). But orchestration is **stateless** — CLI commands return placeholders, the gateway creates a fresh Composer per request, no runs survive restart, Discord/WS not wired to orchestration events. This phase makes it production-grade.
-
-## Phase 1 — Complete ✅
-
-| Crate | Tests | Status |
-|-------|-------|--------|
-| `odin-core` | 8 | ✅ Foundation |
-| `odin-loop` | 33+1 | ✅ 7-phase engine + skills injection |
-| `odin-providers` | 17+6+3 | ✅ Provider factory + FallbackProvider + E2E |
-| `odin-tools` | 133 | ✅ Registry, 25+ tools, validator, reliability |
-| `odin-memory` | 30 | ✅ SQLite store |
-| `odin-permissions` | 69 | ✅ Policy, approval, secrets, redaction (25+ patterns) |
-| `odin-audit` | 8 | ✅ File logger with redaction |
-| `odin-scheduler` | 33+2 | ✅ Cron engine + SQLite persistence + E2E |
-| `odin-skills` | 13 | ✅ Markdown registry with tool validation |
-| `odin-runtime` | 17 | ✅ Agent/session management |
-| `odin-gateway` | 31 | ✅ HTTP + WebSocket + Discord + E2E |
-| `odin-baseline` | 4 | ✅ Benchmarks |
-| `odin-orchestrator` | 75 (61+14) | ✅ Composer, TaskGraph, FileLock, Lifecycle, Merge, Persistence, Integration |
-| `odin-cli` | — | ✅ CLI with orchestrate command group (+11 subcommands) |
-
----
-
-## Phase 2: Complete ✅
-
-### 1. Wire odin-skills into real execution ✅
-- [x] SkillRegistry loads from disk (config.agent.skills_dir)
-- [x] Skills injected into PLAN phase system prompt
-- [x] `Engine::load_skill(name)` returns skill content
-- [x] CLI: `odin skills list` with --dir flag
-- [x] Sample skills: `examples/skills/code-review.md` + `git-workflow.md`
-- [x] Integration + E2E tests: skills load → inject into PLAN (5 tests pass)
-
-### 2. Scheduler persistence + real execution ✅
-- [x] SQLite-backed job store (store.rs, 28 tests)
-- [x] Jobs survive restart — loaded from DB on scheduler start
-- [x] **Jobs execute real agent tasks** — full LoopEngine with provider, tools, skills, audit
-- [x] add/remove/enable/disable persisted to DB
-- [x] E2E: persistence across restarts, enable/disable persists (2 tests)
-
-### 3. Discord gateway ✅
-- [x] Real serenity 0.12 integration with slash commands
-- [x] Commands: `/odin run <task>`, `/odin status`, `/odin sessions`, `/odin tasks`
-- [x] Permission gating (admin role check)
-- [x] Threaded task updates + gateway lifecycle
-
-### 4. WebSocket gateway ✅
-- [x] Axum WebSocket upgrade handler with connection manager
-- [x] Broadcast channel for live task updates
-- [x] JSON protocol: task_submit, task_progress, task_complete, task_error, ping/pong
-- [x] Capacity limiting, welcome messages, clean disconnect
-- [x] E2E: in-order delivery, broadcast, serde round-trip (3 tests)
-
-### 5. Session/task persistence ✅
-- [x] Task history and session persistence in SQLite
-- [x] Scheduler store saves/loads from DB
-- [x] E2E: query by session, session isolation, empty query (3 tests)
-
-### 6. Provider fallback chains ✅
-- [x] FallbackProvider with ordered chain: primary → fallback1 → fallback2
-- [x] Circuit breaker (N failures → open → cooldown → retry)
-- [x] Background health checks
-- [x] Config: fallback_chain, health_check_interval_secs, circuit_breaker_threshold
-- [x] CLI: `odin providers list`
-- [x] E2E: fallback on failure, circuit breaker opens, state persists (3 tests)
-
-### 7. CLI UX improvements ✅
-- [x] `odin skills list` — show loaded skills
-- [x] `odin providers list` — show configured providers
-- [x] `odin tasks list|inspect` — task history from audit log
-- [x] `odin sessions list|inspect` — session history from audit log
-- [x] `odin tools list` — show registered tools with params
-- [x] `odin audit replay <id>` — chronological audit replay
-- [x] `odin status` — runtime summary (version, providers, skills, scheduler, memory, audit)
-- [x] 20 CLI parse tests covering all commands
-
-### 8. Benchmark/eval suite ✅
-- [x] Criterion bench runs: Looped engine 11.4µs/iter, Baseline 1.8µs/iter (6.3x overhead)
-- [x] Live comparison harness (`odin-loop/tests/comparison_harness.rs`)
-- [ ] Full live-model benchmark (needs provider API keys — 2 baseline tests ignored)
-
-### 9. Safety hardening ✅
-- [x] SecretRedactor: 12 patterns for API keys, tokens, JWT, private keys
-- [x] Expanded dangerous commands: 22 patterns
-- [x] ApprovalGate with submit/approve/deny/timeout/auto-approve
-- [x] PolicyEngine rate limiting + path boundaries
-- [x] SecretManager with env var loading + masking
-
-### 10. E2E Tests ✅
-- [x] Scheduler persistence: survive restart, enable/disable persists (2 tests)
-- [x] Skills execution: LoopEngine injects skills into PLAN (1 test)
-- [x] WebSocket messages: in-order, broadcast, serde round-trip (3 tests)
-- [x] Provider fallback: fallback on failure, circuit breaker, state persistence (3 tests)
-- [x] Task history: query by session, session isolation, empty query (3 tests)
-- [x] **12 new E2E tests, all pass**
-
-### 11. Docs & Polish ✅
-- [x] README updated for Phase 2 features
-- [x] examples/config.yaml with all new fields
-- [x] CHANGELOG.md v0.2.0 entry
-
----
-
-## Phase 3: Basic Tool Validation ✅ COMPLETE
-
-> **Completed 2026-07-07.** Validated all 6 built-in tools with schemas, permissions, capability tags, CLI commands, API endpoints, CI script, docs, duplicate detection, and secret redaction. See v0.3.0-tool-validation tag.
-
-### Tool Inventory
-
-| # | Tool | Category | Schema | Tests | Permissions | Safety | Capability Tags | Status |
-|---|------|----------|--------|-------|-------------|--------|-----------------|--------|
-| 1 | `file_read` | filesystem | ✅ JSON | ✅ 3 | ✅ sandbox-checked | ✅ safe | `filesystem`, `read`, `safe` | ✅ Validated |
-| 2 | `file_write` | filesystem | ✅ JSON | ✅ 3 | ✅ sandbox-checked | ⚠️ dangerous | `filesystem`, `write`, `dangerous` | ✅ Validated |
-| 3 | `shell` | shell | ✅ JSON | ✅ 10 | ✅ requires_approval | ⚠️ dangerous | `shell`, `system`, `dangerous` | ✅ Validated |
-| 4 | `web_fetch` | web | ✅ JSON | ✅ 4 | ✅ URL validation | ✅ safe | `web`, `http`, `read`, `safe` | ✅ Validated |
-| 5 | `web_search` | web | ✅ JSON | ✅ 2 | ✅ safe | ✅ safe | `web`, `search`, `read`, `safe` | ✅ Validated |
-| 6 | `git` | version-control | ✅ JSON | ✅ 5 | ✅ requires_approval | ⚠️ dangerous | `version-control`, `git`, `dangerous` | ✅ Validated |
-
-### Validation Checklist
-- [x] **Tool Validator harness** (odin-tools/src/validator.rs) — schema, args, permissions checks (18 tests)
-- [x] **Capability tags** on all Tool impls — `capability_tags()` returns `&[&str]`
-- [x] **validate_args()** on Tool trait — default impl checks args against JSON schema
-- [x] **is_dangerous()** on Tool trait — quick safety classification
-- [x] **CLI commands**: `odin tools inspect <name>`, `odin tools validate`, `odin tools test <name>`
-- [x] **API endpoints**: GET /tools, GET /tools/:name, POST /tools/validate
-- [x] **Automated tests** for every tool category (11 validator tests + 24 CLI parse tests)
-- [x] **Tool docs** (docs/tools.md) — every tool documented with examples
-- [x] **CI script** (scripts/validate-tools.sh) — runs tool validation suite, fails on errors
-- [x] **Mock/dry-run tests** for Shell and Git ✅ (Shell: 2 dry-run tests added — safe + dangerous blocked)
-- [x] **Secret redaction** on tool output ✅ (SecretRedactor applied in ACT phase before audit/display)
-- [x] **Audit logging** for every tool call ✅ (structured AuditEntry with input summary, result, duration, permission)
-- [x] **Duplicate detection** ✅ (ToolValidator::detect_duplicates — same-name + identical-schema checks)
-- [x] **Enable/disable from config** ✅ (ToolsConfig.enabled/disabled wired into tool registration)
-- [ ] **Sandbox hardening** — network boundary (deferred → GH #1: block internal IPs for web tools)
-- [ ] **Reliability scoring** — track success rate per tool in audit log (deferred → GH #2: per-tool success rate tracking)
-
-### Definition of Done
-- [x] All 6 tools validated by ToolValidator (52 tests pass)
-- [x] CLI/API expose all tools with validation status
-- [x] CI validation script exists and passes (9 steps, all green)
-- [x] Tool docs exist with examples
-- [x] Every tool has unique name, description, JSON schema
-- [x] Every tool has capability tags
-- [x] Dangerous tools require approval (shell, git, file_write: requires_approval = true)
-- [x] Every tool call is audited (structured AuditEntry per call)
-- [x] No tool outputs secrets (SecretRedactor applied in ACT phase)
-- [x] Duplicate detection implemented (same-name + identical-schema checks)
-- [x] Tools can be enabled/disabled from config (ToolsConfig filtering)
-
----
-
-## Phase 4: Tool Ecosystem Expansion + Always-On Platform ⬅️ ACTIVE
-
-> **Goal:** Expand from 6 built-in tools to a comprehensive tool ecosystem of 50+ tools across all categories. Turn Raven into a reliable always-on agent platform with a huge safe tool ecosystem. Build the plugin/MCP connector infrastructure, add diagnostics/automation/GitHub tools, wire skills into tool execution, add reliability scoring, and ensure every tool is validated/tested/documented/gated.
-
-### 4.1 — Tool Inventory Expansion (target: 50+ tools) 🔄 IN PROGRESS (10→15 tools)
-
-#### 4.1.1 GitHub Tools ✅
-- [x] `github_issue_create` — 22 tests in github.rs module
-- [x] `github_issue_search`
-- [x] `github_pr_create`
-- [x] `github_pr_status`
-- [x] `github_actions_status`
-
-#### 4.1.2 Diagnostic Tools ✅
-- [x] `system_info` — kernel version, hostname, CPU arch, memory (safe, read-only)
-- [x] `disk_usage` — runs `df -h` with optional path (safe, read-only)
-
-#### 4.1.5 Media Tools
-- [ ] `http_request` — ✅ full HTTP client (GET/POST/PUT/DELETE) in web.rs
-
-#### 4.1.6 Data Tools
-- [x] `json_extract` — dot-path JSON extraction (data.rs, 5 tests)
-
-### 4.2 — Plugin / MCP Connector Infrastructure ✅
-- [x] `odin-mcp` crate created — MCP client, tool adapter, stdio transport, mock transport
-- [x] Load MCP tools from config (mcp_servers list)
-- [x] MCP tool auto-registration: McpToolAdapter implements Tool trait
-- [x] MCP transport: stdio transport working, HTTP scaffolded
-- [x] Config: McpServerConfig in odin-core/src/config.rs
-- [x] Tests: 13 pass (client, adapter, transport, schema conversion)
-- [ ] Wire into CLI/gateway startup (load MCP servers, register tools)
-
-### 4.3 — Tool Catalog & Metadata ✅
-- [x] `ToolCatalog` struct — indexed by category, name, tags, safe/dangerous
-- [x] Generate catalog from registry at startup
-- [x] `odin tools catalog` CLI — table/json/yaml output with --category and --tag filters
-- [x] Tests: 7 catalog tests pass
-- [ ] API endpoints: GET /tools/catalog, GET /tools/catalog/:category
-
-### 4.4 — `odin tools doctor` ✅ COMPLETE
-- [x] Doctor checks: schema valid, args valid, permissions, tags, duplicates, etc.
-- [x] `odin tools doctor` CLI with full report output
-- [x] API endpoint: POST /tools/doctor
-- [x] Tests: 8 doctor tests pass
-- [x] CI: validate-tools.sh expanded with doctor step
-
-### 4.5 — Dry-Run / Mock Tests ✅ COMPLETE
-- [x] `DryRunTool` wrapper — intercepts execution, returns mock result (8 tests)
-- [x] Mock configuration: `DryRunConfig` with validate_args, mock_output, mock_success, mock_error
-- [x] `odin tools test --dry-run` flag
-- [x] Mock tests for dangerous tools (shell, git, file_write) in CI
-- [x] Real integration tests for safe tools (system_info, etc.)
-- [x] CI: validate-tools.sh Step 11 verifies 3 dangerous tools dry-run
-
-### 4.6 — Audit Logging Hardening ✅ COMPLETE
-- [x] Every tool call audited with: input_summary, permission_decision, duration_ms, result, redacted_output
-- [x] Redaction wired into AuditLoggerImpl via `mask_secrets` flag (SecretRedactor.full() when enabled)
-- [x] Audit query by tool name, session_id, agent_id, time range (existing query method)
-- [x] Audit retention: configurable buffer with file flushing
-- [x] API endpoint: GET /audit/tools?tool=shell&limit=50 (via gateway)
-- [x] CLI: `odin audit replay <id>` — existing, works
-- [x] CLI: `odin audit list` / `odin audit search` / `odin audit show` (deferred — existing replay covers needs)
-
-### 4.7 — Secret/PII Redaction Expansion ✅ COMPLETE
-- [x] PII patterns: email, phone, SSN, credit card, IP addresses (25+ total patterns)
-- [x] Two-layer redaction: Secrets + PII, configurable levels (SecretsOnly, PIIOnly, Full, Custom)
-- [x] Redaction applied to: tool outputs, audit logs (via AuditLoggerImpl), CLI output (via redact helpers)
-- [x] Configurable redaction: enable/disable per pattern, exclude list, custom patterns
-- [x] `redact_json()` — recursive JSON redaction for nested tool outputs
-- [x] `detect_pii()`, `detect_secrets()`, `detect()` — categorized detection
-- [x] 69 tests pass (up from 5) — 20+ secret patterns, 6 PII patterns, no false positives on clean text
-
-### 4.8 — Reliability Scoring ✅ COMPLETE
-- [x] Per-tool success/failure tracked in `ReliabilityTracker` (thread-safe, in-memory)
-- [x] Reliability score: 0.0–1.0 with exponential decay (configurable half-life), sliding window (default 100)
-- [x] `ToolReliability` struct: score, total_calls, success_count, failure_count, success_rate, avg_duration_ms, is_unreliable, calls_until_mature
-- [x] `odin tools reliability` CLI — sorted score table with alert flags
-- [x] API endpoint: GET /tools/reliability (deferred — available through CLI)
-- [x] 12 tests: default score, perfect/low/mixed, decay, window trimming, unreliable detection, reset
-
-### 4.9 — Capability Tags Expansion ✅ COMPLETE
-- [x] Tag taxonomy: safe/dangerous, read/write, network/local, fast/slow, idempotent
-- [x] Tag-based tool filtering: CLI `odin tools list --tag safe --tag read` (AND logic)
-- [x] Tag validation: every tool has at least safe or dangerous tag (doctor-enforced)
-- [x] API: `GET /tools?tags=safe,read` with comma-separated tag filtering
-- [x] Multi-tag AND filtering: `--tag safe --tag read` returns intersection
-
-### 4.10 — Skill–Tool Wiring ✅ COMPLETE
-- [x] Skills declare `recommended_tools: [tool_name, ...]` in frontmatter (in addition to `required_tools`)
-- [x] `SkillTrait::recommended_tools()` added to odin-core trait
-- [x] `SkillRegistry::tools_for_skill(name)` returns `SkillTools { required, recommended }`
-- [x] `SkillRegistry::validate_tools(available)` checks all skills against available tool list, returns `Vec<SkillValidation>`
-- [x] CLI: `odin skills tools <name>` — shows required/recommended tools + availability cross-check
-- [x] CLI: `odin skills list` now shows tool counts per skill and validation warnings
-- [x] `recommended_tools` round-trips through YAML frontmatter (serialize + deserialize)
-- [x] 13 tests pass (up from 7) — frontmatter parsing, tool retrieval, 4 validation scenarios
-
-### 4.11 — Always-On Platform Hardening ✅ COMPLETE
-- [x] Graceful shutdown: drain active tasks on SIGTERM/SIGINT with 30s timeout
-- [x] Health check endpoint: GET /health with dependency status (tools, task_handler, readiness)
-- [x] Startup health: `GatewayState::mark_ready()` + `is_ready()`, server reports "starting" until ready
-- [x] `odin serve` daemon mode: `run_http_server` with graceful shutdown
-- [x] Metrics endpoint: GET /metrics (uptime, active_tasks, total_requests, total_tool_calls, tool_errors, tool_count, tool_error_rate)
-- [x] `GatewayState` with atomic counters: ready (AtomicBool), active_tasks, total_tool_calls, total_tool_errors, total_requests
-- [x] Rate limiting per endpoint, per agent, per tool (deferred — counters in place for future rules engine)
-- [x] Connection draining on shutdown signal (with 30s timeout)
-- [x] 34 gateway tests pass (31 unit + 3 E2E)
-
-### 4.12 — Benchmarks / Evals Expansion ✅ COMPLETE
-- [x] Tool selection benchmark: large catalog test (50 tools) verifies no quadratic blowup
-- [x] Looped vs single-pass comparison: baseline test verifies consistency with mock provider
-- [x] Baseline agent: 4 tests pass (simple task, tool use, large catalog, consistency check)
-- [x] Existing criterion benchmarks preserved (looped 11.4µs, baseline 1.8µs)
-- [ ] Full live-model benchmark (needs provider API keys — deferred GH #3)
-
-### 4.13 — CI & Quality Gates ✅ COMPLETE
-- [x] CI fails if any tool lacks: schema, description, capability tags, tests, docs
-- [x] CI validates validate-tools.sh with 16 steps: build, unit tests, validator, workspace, duplicates, tags, permissions, redaction, docs, doctor, dry-run, quality gates, permissions enforcement, skill-tool wiring, PII coverage, audit integration
-- [x] CI checks: schema validation, description enforcement, capability tags, permissions, redaction patterns, test coverage, docs, doctor, dry-run safety, skill-tool wiring
-- [x] CI fails if any dangerous tool lacks approval requirement (Step 7)
-- [x] CI fails if any tool output leaks secrets/PII in test runs (Step 15)
-- [ ] Pre-commit hook (deferred — CI script covers all gates)
-
-### Definition of Done (Phase 4)
-- [x] 15+ tools registered across all categories (50+ target — deferred for tool ecosystem scaling)
-- [x] MCP connector loads external tools dynamically (crate built, 14 tests pass)
-- [x] Tool catalog generated and queryable via CLI/API
-- [x] `odin tools doctor` passes with 0 failures
-- [x] Every tool has: unique name, JSON schema, description, capability tags, tests, docs, permission policy
-- [x] Dry-run tests exist for all dangerous tools
-- [x] Real integration tests exist for all safe tools
-- [x] Every tool call is fully audited (input_summary, permission, duration, result, redacted_output)
-- [x] Secret/PII redaction applied across 25+ patterns (secrets + PII) with configurable levels
-- [x] Reliability scoring active for all tools (decay-weighted, sliding window, alert thresholds)
-- [x] Skills declare required/recommended tools with cross-registry validation
-- [x] Platform health checks: build 0 errors, validator 0 failures, doctor 0 failures
-- [x] CI green: 16-step validation script covering build, tests, schemas, permissions, tags, redaction, docs, doctor, dry-run, skills, audit
-- [x] Docs match working system exactly
-
----
-
-## Phase 5: Multi-Agent Orchestration (Raven Agent) ⬅️ ACTIVE
-
-> **Completed 2026-07-08.** Renamed project to **raven-agent**, added `odin-orchestrator` crate with full Composer/Orchestrator layer. Default behavior is now multi-agent orchestration.
-
-### 5.1 — Project Rename ✅
-- [x] **raven-ai-harness → raven-agent** across all docs, Cargo.toml, README, ARCHITECTURE, CHANGELOG
-- [x] Repository URL updated: `https://github.com/hermes-gadget/raven-agent`
-- [x] Binary name stays `odin` (internal CLI); project is `raven-agent`
-- [x] Version bumped to 0.2.0 → 0.3.0
-
-### 5.2 — odin-orchestrator Crate ✅ (61 tests)
-- [x] **Composer**: User-facing orchestrator — receives intent, decomposes goals, steers sub-agents
-- [x] **TaskGraph**: DAG with topological sort, cycle detection, independent group detection, progress tracking
-- [x] **FileLockManager**: Concurrent read, exclusive write, FIFO queue, auto-grant on release
-- [x] **AgentLifecycle**: 8 phases (queued→running→blocked→waiting_for_lock→reviewing→done→failed→cancelled)
-- [x] **SubAgent**: Scoped agent with restricted files/tools/permissions/config builder
-- [x] **MergeResolver**: 5 strategies (concatenate, first-wins, last-wins, manual, auto) + conflict detection
-- [x] **ProgressTracker**: Workstream status, formatted summaries, compact one-line status
-- [x] **SQLite Persistence**: TaskGraph + AgentLifecycle survive restart via `OrchestrationStore`
-
-### 5.3 — Multi-Agent Default Behavior ✅
-- [x] Composer auto-decomposes user messages into task graph
-- [x] Heuristic splitting: commas, semicolons, "and" → multiple nodes
-- [x] Independent workstreams detected (no shared dependencies → parallel)
-- [x] Sub-agents get only the files/tools/capabilities they need
-- [x] Parallel results merged into single coherent response
-
-### 5.4 — File Locking ✅
-- [x] Read locks: concurrent access for multiple agents
-- [x] Write locks: exclusive, FIFO queue, auto-grant on release
-- [x] Read-after-write: readers blocked until write lock released
-- [x] Integration: Composer.start_agent() acquires locks, complete/fail/cancel releases all
-
-### 5.5 — Interruption Handling ✅
-- [x] **Pause all**: Block all running agents
-- [x] **Resume all**: Unblock and restart where they left off
-- [x] **Cancel all**: Terminal cancel with reason
-- [x] **Reprioritize**: Change agent priority mid-execution
-
-### 5.6 — Persistence ✅
-- [x] SQLite tables: `task_graphs`, `agent_lifecycles`
-- [x] Save/load task graphs by root goal
-- [x] Save/load agent lifecycles by agent ID
-- [x] List all stored graphs and lifecycles
-- [x] Update in-place (upsert on conflict)
-
-### 5.7 — Tests ✅
-- [x] Task graph: topological sort, cycle detection, independent groups, ready nodes, progress
-- [x] File locking: concurrent reads, exclusive writes, queue, grant-on-release, summary
-- [x] Lifecycle: full state machine, retry, lock tracking, phase transitions, terminal/active checks
-- [x] Merge: all 5 strategies, conflict detection, partial failure
-- [x] Persistence: save/load/update for both graphs and lifecycles
-- [x] Composer: decomposition, agent registration, lifecycle transitions, file lock integration, pause/resume, cancel, reprioritize, collect/merge
-- [x] Progress: update, format, compact status, removal
-
-### 5.8 — Wire into CLI, API, Discord, WebSocket ✅
-- [x] `odin orchestrate submit <goal>` — Decomposes and shows orchestration plan
-- [x] `odin orchestrate status` — Shows orchestration state
-- [x] `odin orchestrate agents` — Lists sub-agents
-- [x] `odin orchestrate locks` — Shows file lock state
-- [x] `odin orchestrate queue` — Shows write queue
-- [x] `odin orchestrate inspect/cancel/pause/resume` — Manage running tasks
-- [x] `odin run --direct` — Legacy single-agent mode
-- [ ] API: `POST /orchestrate`, `GET /orchestrate/:id/status` (deferred — core engine complete)
-- [ ] Discord/WebSocket: orchestration commands (deferred — core engine complete)
-
-### Definition of Done (Phase 5)
-- [x] Project consistently named **raven-agent**
-- [x] CLI branded as "Raven Agent — multi-agent AI orchestration platform"
-- [x] `odin orchestrate` command group with 11 subcommands (submit, status, inspect, cancel, pause, resume, agents, locks, queue)
-- [x] `odin run` defaults to orchestrated mode (with `--direct` for legacy)
-- [x] Composer decomposes user goals into task graphs
-- [x] Heuristic splitting: commas, semicolons, "and" → multiple parallel sub-tasks
-- [x] Task graph: topological sort, cycle detection, independent workstream detection
-- [x] File-level locking: concurrent reads, exclusive writes, FIFO queue, auto-grant
-- [x] Agent lifecycle: 8 phases (queued→running→blocked→waiting_for_lock→reviewing→done→failed→cancelled)
-- [x] Interruption: pause (releases locks), resume (re-acquires), cancel, reprioritize
-- [x] Persistent state: task graphs and agent lifecycles survive restart (SQLite)
-- [x] Conflict detection: files modified by multiple agents flagged
-- [x] Merge resolution: 5 strategies, conflict-aware summaries
-- [x] **75 tests pass** (61 unit + 14 integration) covering:
-  - 5 unrelated tasks → decomposition
-  - Parallel execution with no file conflicts
-  - Overlapping file edits → queue + lock grant
-  - Concurrent reads allowed, write blocks reads
-  - Write lock FIFO ordering
-  - Cancellation releases locks
-  - Conflicting edits detected
-  - Pause and resume with lock re-acquisition
-  - Failed sub-agent tracking
-  - Persistence: task graph + lifecycle survive restart
-  - Final answer composition from multiple agents
-  - Orchestration with partial failure
-- [ ] API endpoints for orchestration (deferred — core engine complete)
-- [ ] Live LLM integration for smart decomposition (deferred — heuristic in place)
-
----
-
-## Phase 6: Production Orchestration Completion ⬅️ ACTIVE
-
-> **Goal**: Turn the stateless v0.3 orchestration demo into a real production system.
-> Stateful runs, persistent state, real CLI responses, full API, Discord/WS wiring.
-
-### 6.0 — Audit & Fix Naming/Version Consistency ✅
-- [x] Audit complete: workspace version 0.2.0→0.3.0, 1 old name in ARCHITECTURE, 1 in CHANGELOG, 1 in TODO
-- [x] Fix workspace Cargo.toml version to 0.3.0
-- [x] Fix odin-orchestrator Cargo.toml to use `version.workspace = true`
-- [x] Remove remaining "raven-ai-harness" / "Raven AI Harness" from ARCHITECTURE.md, CHANGELOG.md, TODO.md, docs/ARCHITECTURE.md, docs/comparison-analysis.md, examples/config.yaml, web.rs user-agent
-- [x] Update CHANGELOG.md with v0.3.0 date
-
-### 6.1 — Stateful Orchestration via SQLite 🔄
-- [x] `OrchestrationStore` trait + `SqliteOrchestrationStore` built (366 lines)
-- [x] Task graph save/load/update works
-- [x] Agent lifecycle save/load works
-- [x] **`odin orchestrate submit` creates a persistent run ID, saves to SQLite**
-- [x] **`odin orchestrate status` queries DB** (lists graphs + lifecycles)
-- [x] **`odin orchestrate inspect <id>` loads from DB** (graphs or lifecycles)
-- [ ] **`odin orchestrate cancel/pause/resume` operates on stored state** (stub, needs wiring through run_id)
-- [ ] **Restore unfinished runs after restart** — load from DB on startup
-- [ ] State directory: ~/.raven-agent/orchestration.db (created automatically)
-
-### 6.2 — Fix CLI Stubs ✅ (2/6 fixed)
-- [x] `odin orchestrate status` — queries real stored run state
-- [x] `odin orchestrate inspect <id>` — loads from DB, shows task graph + agent states
-- [ ] `odin orchestrate cancel <id>` — stub (needs active run reference)
-- [ ] `odin orchestrate pause/resume` — stub (needs active runtime)
-- [ ] `odin orchestrate agents` — stub
-- [ ] `odin orchestrate locks/queue` — stub
-
-### 6.3 — Gateway: Stateful HTTP Orchestration Endpoints 🔄
-- [x] `POST /orchestrate` — creates fresh Composer (stateless, no run ID)
-- [x] `GET /orchestrate/:id/status` — returns hardcoded placeholder
-- [ ] **Give POST /orchestrate a persistent run ID**, stored in SQLite
-- [ ] **Make GET /orchestrate/:id/status return real DB state**
-- [ ] Add `POST /orchestrate/:id/pause`, `POST /orchestrate/:id/resume`, `POST /orchestrate/:id/cancel`
-- [ ] Add `GET /orchestrate/:id/agents`, `GET /orchestrate/:id/locks`
-
-### 6.4 — Discord & WebSocket Orchestration Events
-- [ ] Add `/odin orchestrate` slash command to Discord (submit, status, agents, locks)
-- [ ] Wire WebSocket broadcast to orchestration events (task_started, task_progress, task_complete, lock_acquired, lock_released)
-- [ ] WebSocket orchestration control commands (pause, resume, cancel)
-
-### 6.5 — LLM-Based Decomposition
-- [ ] Add `decompose_with_llm()` using the planning model
-- [ ] Fall back to heuristic splitting if LLM unavailable or fails
-- [ ] Detect dependencies, likely files, tools, risk, execution order
-- [ ] Persist decomposition results in task graph
-
-### 6.6 — Persistent File Locks & Write Queues
-- [x] FileLockManager built (in-memory, works correctly)
-- [ ] **Persist locks to SQLite** — survive restart
-- [ ] **Persist write queue** — queued agents restored after restart
-- [ ] FileLockManager::load_from_db() on startup
-
-### 6.7 — Sub-Agent Scoping & Per-Agent Audit
-- [ ] Sub-agents get scoped tools (only what they need, not all registered)
-- [ ] Per-agent audit trail: each sub-agent call logged with agent_id
-- [ ] Sub-agent result persistence: store outputs, errors, duration
-
-### 6.8 — Retry / Reassignment for Failed Sub-Agents
-- [ ] Failed sub-agent auto-retry (configurable max retries)
-- [ ] Reassign to different model/provider on persistent failure
-- [ ] Track retry count in AgentLifecycle (field exists)
-
-### 6.9 — MCP Tool Wiring
-- [x] odin-mcp crate built (13 tests)
-- [ ] **Wire MCP tools into CLI startup** — load MCP servers from config, register tools
-- [ ] **Wire MCP tools into gateway startup** — same registration
-- [ ] MCP tool validation integrated into `odin tools validate`
-
-### 6.10 — Tool Validation Gate
-- [x] validate-tools.sh script exists (16 steps)
-- [x] Tool validator, doctor, catalog all built and tested
-- [ ] **Run validate-tools.sh and fix any failures**
-- [ ] Every tool must have: schema, docs, permission policy, capability tags, tests
-
-### 6.11 — Verification
-- [ ] `cargo fmt --all -- --check` passes
-- [ ] `cargo clippy --workspace -- -D warnings` passes
-- [ ] `cargo check --workspace` passes
-- [ ] `cargo test --workspace` passes
-- [ ] `cargo bench --no-run` compiles
-- [ ] `scripts/validate-tools.sh` passes
-
-### Definition of Done (Phase 6)
-- [x] Architecture audit complete
-- [ ] Version/naming consistent everywhere
-- [ ] Orchestration is default and persistent (SQLite)
-- [ ] CLI/API/Discord/WS can control real runs (not placeholders)
-- [ ] Interruptions work on stored state
-- [ ] Locks/queues survive restart
-- [ ] LLM decomposition works with heuristic fallback
-- [ ] Tool validation passes (validate-tools.sh green)
-- [ ] All verification gates pass
-- [ ] TODO/docs match reality exactly
+# Raven Agent — TODO
+
+> Updated: 2026-07-09 | Workspace version: 0.3.0
+
+## TUI Responsiveness + Live Agent Feedback Debug
+
+Only mark these items complete after reproducing the stall, tracing the live path, implementing the fix, and verifying current runtime behavior.
+
+### Required investigation
+
+- [x] Reproduce the TUI responsiveness issue by running `raven` and starting a real orchestrated task.
+- [x] Confirm whether the orchestrator is running, blocked, waiting for provider, waiting for approval, waiting for locks, or failed.
+- [x] Trace TUI input -> run creation -> composer -> sub-agent spawn -> provider/tool calls -> event stream -> TUI render.
+- [x] Add logs/telemetry around each runtime stage.
+- [x] Identify why the UI can show no useful feedback for long periods.
+
+### Required fixes
+
+- [x] Show immediate feedback within 1 second after task submission.
+- [x] Surface stages: planning, decomposing, spawning agents, waiting for model, running tool, waiting for lock, approval needed, retrying, failed, done.
+- [x] Add visible spinner/heartbeat for active agents.
+- [x] Update the right-side agent panel live with status, current task, current tool/model call, elapsed time, and last event.
+- [x] Show progress messages in the chat panel.
+- [x] Show `waiting for model...` with elapsed time when a provider/model call exceeds 10 seconds.
+- [x] Warn when no event arrives for 15 seconds and show the last known stage.
+- [x] Show exact blocked reasons and runtime errors in the UI.
+- [x] Add timeout handling and UI cancellation that actually stops the active run.
+- [x] Ensure user interrupts steer or cancel the active run, not disconnected state.
+
+### Testing
+
+- [x] Add automated TUI state/event update tests where practical.
+- [x] Add a fake slow provider test using mocked time/events to prove the UI keeps updating during a 90s-equivalent wait.
+- [x] Add submit -> planning -> agent running -> tool/model wait -> result integration coverage.
+- [x] Manually test over SSH/small terminal.
+- [x] Test one task and five unrelated tasks.
+- [x] Test provider unavailable, slow provider, tool failure, approval needed, lock wait, cancel, pause/resume.
+
+### Required gates
+
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo check --workspace --all-targets`
+- [x] `cargo test --workspace --all-targets`
+- [x] `scripts/validate-tools.sh`
+
+## End-to-End Verification + TUI Rework
+
+Only mark these items complete when they are implemented, wired to real state, tested, documented, and usable.
+
+### TUI requirements
+
+- [x] Make `raven` launch the primary TUI by default.
+- [x] Rework the TUI into a chat-first, keyboard-driven Codex/Claude Code-style interface.
+- [x] Keep the main center/left panel focused on conversation, goals, Raven responses, approval prompts, errors, and final summaries.
+- [x] Keep a multiline input box fixed at the bottom.
+- [x] Keep a live agent status panel always visible by default on the right.
+- [x] Show active run ID, sub-agent names, agent tasks, lifecycle state, current tool call, files read/written, held locks, queued write locks, progress %, and last update/error in the right panel.
+- [x] Add tabs for Chat, Agents, Task Graph, Files/Locks, Tools, Logs/Audit, History, and Conflicts.
+- [x] Keep logs/audit detail out of the chat view except for relevant summaries/errors.
+- [x] Show dangerous actions as clear approve/deny modals.
+- [x] Route user messages into the active run instead of creating disconnected fake runs.
+- [x] Support pause, resume, cancel, redirect, and reprioritise interruptions.
+- [x] Stream live updates from real orchestration state.
+- [x] Ensure the UI works over SSH and small terminals.
+
+### End-to-end verification
+
+- [x] Test `raven`.
+- [x] Test `raven run`.
+- [x] Test `raven run --direct`.
+- [x] Test `raven ui`.
+- [x] Test orchestration with 5 unrelated tasks.
+- [x] Test overlapping file edits queue correctly.
+- [x] Test pause/resume/cancel.
+- [x] Test restart recovery.
+- [x] Test provider fallback.
+- [x] Test MCP/tool loading.
+- [x] Test approval gates and secret/PII redaction.
+- [x] Test TUI rendering/event handling/state updates.
+
+### Required gates
+
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo clippy --workspace --all-targets -- -D warnings`
+- [x] `cargo check --workspace --all-targets`
+- [x] `cargo test --workspace --all-targets`
+- [x] `cargo bench --no-run` where relevant
+- [x] `scripts/validate-tools.sh`
+
+## Repo Tidy + Stabilisation Pass — Complete
+
+### Naming, version, and packaging
+
+- [x] Make **Raven Agent** the user-facing product name.
+- [x] Make **raven** the primary and default command.
+- [x] Keep **odin** only as an internal crate prefix and documented compatibility alias.
+- [x] Separate the raven and odin binary entry points so Cargo no longer builds one source file as two targets.
+- [x] Use version **0.3.0** across manifests, runtime output, README, CHANGELOG, docs, examples, and MCP client metadata.
+- [x] Point repository metadata and quickstart at the real GitHub repository. The historical repository slug is intentionally retained as a locator.
+
+### CLI, TUI, and configuration
+
+- [x] Make bare **raven** open the TUI; keep bare **odin** non-interactive.
+- [x] Replace disconnected TUI approval, pause, resume, interrupt, and cancel controls.
+- [x] Make TUI submission persist a real building-state plan with a stable run ID.
+- [x] Populate TUI graph, agents, locks, tool catalog, redacted log, history, progress counts, and declared conflicts from real data.
+- [x] Fix Unicode input cursor and deletion boundaries.
+- [x] Use **~/.config/raven/config.yaml** and **RAVEN_CONFIG** canonically while retaining legacy read fallbacks.
+- [x] Wire configured data, memory, audit, scheduler, sandbox, enabled-tool, disabled-tool, and MCP environment settings.
+- [x] Make missing explicit config paths fail with an actionable error instead of silently using defaults.
+- [x] Replace the stale annotated config with the actual deserializable schema.
+
+### Orchestration, scheduler, tools, and gateways
+
+- [x] Persist graphs under the same UUID returned by CLI, HTTP, Discord, and TUI.
+- [x] Retain legacy goal-key graph lookup for old databases.
+- [x] Keep graph JSON and summary statuses synchronized, including paused state.
+- [x] Persist real CLI run node transitions, agent lifecycles, and lock snapshots.
+- [x] Make Composer update graph node assignment, status, result, and final graph status as agents change.
+- [x] Enforce configured tool allow/disable lists and real sub-agent allow-list scoping.
+- [x] Use one standard built-in registry for execution, TUI, and diagnostics.
+- [x] Wire tool registry and audit logging into direct, orchestrated, and HTTP loop engines.
+- [x] Make HTTP health, metrics, inspection, validation, and doctor endpoints use the live configured registry.
+- [x] Mount the advertised **/ws** endpoint with the shared broadcast manager.
+- [x] Start and stop Discord from **raven serve** when gateway configuration enables it.
+- [x] Make scheduler CLI definitions and task goals survive separate invocations.
+- [x] Dispatch scheduled runtime jobs to a registered agent and fail clearly instead of running an inert closure when runtime wiring is missing.
+- [x] Pass configured MCP environment variables to child processes.
+- [x] Make unknown MCP tools unsafe and approval-required by default.
+- [x] Remove generated reliability scores and other demonstration status output.
+- [x] Replace fake Discord direct-send success with an actionable unsupported-operation error.
+- [x] Make Discord default to **/raven** while allowing an explicitly configured legacy prefix.
+
+### Safety, redaction, and tests
+
+- [x] Enforce rate limits, permission decisions, approval requirements, command checks, and path boundaries before tool execution.
+- [x] Fail closed when approval is required and no responder is connected.
+- [x] Require **--approve** for direct dangerous-tool execution; retain **--dry-run** validation.
+- [x] Replace successful simulated tool dispatch with a real failure when no registry is configured.
+- [x] Redact supported secrets and PII from tool results, direct tool output, TUI logs, config display, audit reads, and audit writes.
+- [x] Make durable audit redaction unconditional, including for legacy **mask_secrets: false** config.
+- [x] Remove raw goals, commands, message bodies, and paths from diagnostic tracing where found.
+- [x] Replace the always-true baseline assertion with a behavioral assertion.
+- [x] Fix the circuit-breaker test deadlock and add coverage for stable run IDs, synchronized status, scoped registries, real TUI plan persistence, and Unicode input.
+- [x] Remove the tracked temporary source file and unused fields/helpers found by strict all-target linting.
+
+### Documentation
+
+- [x] Replace README quickstart, command list, architecture, safety behavior, and limitations with current behavior.
+- [x] Replace stale architecture, tools, compatibility, and comparison claims.
+- [x] Clearly distinguish real-model behavior from deterministic comparison fixtures.
+- [x] Update CHANGELOG for this pass.
+
+### Required gates
+
+- [x] **cargo fmt --all -- --check**
+- [x] **cargo clippy --workspace --all-targets -- -D warnings**
+- [x] **cargo check --workspace --all-targets**
+- [x] **cargo test --workspace --all-targets**
+- [x] **cargo bench --no-run**
+- [x] **scripts/validate-tools.sh**
+
+## Deferred work
+
+These items are intentionally not represented as complete:
+
+- [ ] [#1 Interactive approval responder](https://github.com/hermes-gadget/raven-ai-harness/issues/1)
+- [ ] [#4 Live cross-process orchestration control and WebSocket dispatch](https://github.com/hermes-gadget/raven-ai-harness/issues/4)
+- [ ] [#5 Orchestrated sub-agent memory integration](https://github.com/hermes-gadget/raven-ai-harness/issues/5)
+- [ ] [#3 Continuously hosted scheduler execution mode](https://github.com/hermes-gadget/raven-ai-harness/issues/3)
+- [ ] [#2 Persisted real tool reliability samples](https://github.com/hermes-gadget/raven-ai-harness/issues/2)
+
+## Definition of done
+
+- [x] Product naming, command naming, version, config paths, and repository metadata are consistent.
+- [x] No known placeholder UX or fabricated status output remains in user-facing paths.
+- [x] Execution paths use real registries, persistence, permissions, redaction, and audit hooks.
+- [x] README and architecture state limitations instead of presenting deferred behavior as complete.
+- [x] Genuine deferrals have focused GitHub issues.
+- [x] Every required verification gate passes on the final worktree.

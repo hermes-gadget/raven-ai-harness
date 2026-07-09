@@ -70,7 +70,7 @@ impl Default for WsConfig {
 
 // ── Message Types ─────────────────────────────────────────────────────
 
-/// A WebSocket message in the Odin protocol.
+/// A WebSocket message in the Raven Agent protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WsMessage {
     /// Message type.
@@ -172,6 +172,152 @@ impl WsMessage {
             msg_type: "pong".into(),
             payload: None,
             correlation_id: None,
+        }
+    }
+
+    // ── Orchestration Event Types ───────────────────────────────────
+
+    /// Orchestration run started (decomposed goal into sub-tasks).
+    pub fn orchestrate_started(
+        run_id: &str,
+        goal: &str,
+        task_count: usize,
+        workstream_count: usize,
+        correlation_id: Option<String>,
+    ) -> Self {
+        Self {
+            msg_type: "orchestrate_started".into(),
+            payload: Some(serde_json::json!({
+                "run_id": run_id,
+                "goal": goal,
+                "task_count": task_count,
+                "workstream_count": workstream_count,
+            })),
+            correlation_id,
+        }
+    }
+
+    /// A sub-task within an orchestration run has been assigned to an agent.
+    pub fn orchestrate_task_assigned(
+        run_id: &str,
+        task_id: &str,
+        agent_id: &str,
+        goal: &str,
+        correlation_id: Option<String>,
+    ) -> Self {
+        Self {
+            msg_type: "orchestrate_task_assigned".into(),
+            payload: Some(serde_json::json!({
+                "run_id": run_id,
+                "task_id": task_id,
+                "agent_id": agent_id,
+                "goal": goal,
+            })),
+            correlation_id,
+        }
+    }
+
+    /// A sub-task within an orchestration run progressed.
+    pub fn orchestrate_task_progress(
+        run_id: &str,
+        task_id: &str,
+        phase: &str,
+        iteration: u32,
+        confidence: f64,
+        correlation_id: Option<String>,
+    ) -> Self {
+        Self {
+            msg_type: "orchestrate_task_progress".into(),
+            payload: Some(serde_json::json!({
+                "run_id": run_id,
+                "task_id": task_id,
+                "phase": phase,
+                "iteration": iteration,
+                "confidence": confidence,
+            })),
+            correlation_id,
+        }
+    }
+
+    /// A sub-task completed successfully.
+    pub fn orchestrate_task_complete(
+        run_id: &str,
+        task_id: &str,
+        success: bool,
+        summary: &str,
+        correlation_id: Option<String>,
+    ) -> Self {
+        Self {
+            msg_type: "orchestrate_task_complete".into(),
+            payload: Some(serde_json::json!({
+                "run_id": run_id,
+                "task_id": task_id,
+                "success": success,
+                "summary": summary,
+            })),
+            correlation_id,
+        }
+    }
+
+    /// A file lock was acquired by an agent.
+    pub fn orchestrate_lock_acquired(
+        run_id: &str,
+        agent_id: &str,
+        file_path: &str,
+        lock_type: &str,
+        correlation_id: Option<String>,
+    ) -> Self {
+        Self {
+            msg_type: "orchestrate_lock_acquired".into(),
+            payload: Some(serde_json::json!({
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "file_path": file_path,
+                "lock_type": lock_type,
+            })),
+            correlation_id,
+        }
+    }
+
+    /// A file lock was released by an agent.
+    pub fn orchestrate_lock_released(
+        run_id: &str,
+        agent_id: &str,
+        file_path: &str,
+        correlation_id: Option<String>,
+    ) -> Self {
+        Self {
+            msg_type: "orchestrate_lock_released".into(),
+            payload: Some(serde_json::json!({
+                "run_id": run_id,
+                "agent_id": agent_id,
+                "file_path": file_path,
+            })),
+            correlation_id,
+        }
+    }
+
+    /// The entire orchestration run completed (all sub-tasks done).
+    pub fn orchestrate_complete(
+        run_id: &str,
+        success: bool,
+        total_tasks: usize,
+        completed_tasks: usize,
+        failed_tasks: usize,
+        summary: &str,
+        correlation_id: Option<String>,
+    ) -> Self {
+        Self {
+            msg_type: "orchestrate_complete".into(),
+            payload: Some(serde_json::json!({
+                "run_id": run_id,
+                "success": success,
+                "total_tasks": total_tasks,
+                "completed_tasks": completed_tasks,
+                "failed_tasks": failed_tasks,
+                "summary": summary,
+            })),
+            correlation_id,
         }
     }
 }
@@ -373,7 +519,7 @@ async fn handle_ws_connection(socket: WebSocket, conn_mgr: Arc<WsConnectionManag
                         }
                     }
                 } else {
-                    tracing::debug!("[WS] Invalid JSON from {conn_id_clone}: {text}");
+                    tracing::debug!("[WS] Invalid JSON received from {conn_id_clone}");
                 }
             }
             Message::Close(_) => {
@@ -400,8 +546,8 @@ async fn handle_ws_connection(socket: WebSocket, conn_mgr: Arc<WsConnectionManag
 
 // ── Gateway (compatibility wrapper) ───────────────────────────────────
 
-/// A stub-compatible wrapper that exposes the original WsGateway API.
-/// New code should use WsConnectionManager + ws_handler directly.
+/// Compatibility wrapper for embedding the connection manager.
+/// New code should attach [`ws_handler`] to its Axum router directly.
 #[derive(Clone)]
 pub struct WsGateway {
     /// Configuration.
@@ -430,8 +576,8 @@ impl WsGateway {
 
     /// Start the WebSocket server.
     ///
-    /// The actual WS upgrade handler is attached to the Axum router.
-    /// This method is for compatibility with the old stub API.
+    /// The actual WS upgrade handler must already be attached to an Axum router;
+    /// this method only marks the embedded gateway lifecycle as started.
     pub async fn start(&self) -> OdinResult<()> {
         if !self.config.enabled {
             tracing::info!("[WS] Gateway disabled");

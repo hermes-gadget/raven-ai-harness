@@ -1,11 +1,11 @@
-//! Configuration types for the Odin harness.
+//! Configuration types for Raven Agent.
 
 use crate::types::{PathBoundary, PermissionRule};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Top-level configuration for an Odin instance.
+/// Top-level configuration for a Raven Agent instance.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OdinConfig {
     /// General settings
@@ -69,6 +69,15 @@ impl OdinConfig {
         let contents = serde_yaml::to_string(self).map_err(|e| {
             crate::error::OdinError::Config(format!("Failed to serialize config: {}", e))
         })?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                crate::error::OdinError::Config(format!(
+                    "Failed to create config directory {}: {}",
+                    parent.display(),
+                    e
+                ))
+            })?;
+        }
         std::fs::write(path, contents).map_err(|e| {
             crate::error::OdinError::Config(format!(
                 "Failed to write config file {}: {}",
@@ -87,7 +96,7 @@ pub struct GeneralConfig {
     #[serde(default = "default_instance_name")]
     pub instance_name: String,
 
-    /// Directory for Odin data (defaults to ~/.odin)
+    /// Directory for Raven Agent data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
 
@@ -101,7 +110,7 @@ pub struct GeneralConfig {
 }
 
 fn default_instance_name() -> String {
-    "odin".to_string()
+    "raven".to_string()
 }
 
 fn default_log_level() -> String {
@@ -283,7 +292,7 @@ fn default_compression_ratio() -> f64 {
     0.5
 }
 fn default_skills_dir() -> String {
-    "skills".into()
+    "~/.config/raven/skills".into()
 }
 
 impl Default for AgentConfig {
@@ -373,6 +382,17 @@ impl Default for ToolsConfig {
     }
 }
 
+impl ToolsConfig {
+    /// Built-in tools enabled after applying the disabled-name override.
+    pub fn effective_enabled_tools(&self) -> Vec<String> {
+        self.enabled
+            .iter()
+            .filter(|name| !self.disabled.contains(name))
+            .cloned()
+            .collect()
+    }
+}
+
 // ── MCP Config ───────────────────────────────────────────────────────
 
 /// Configuration for a single MCP server connection.
@@ -407,6 +427,15 @@ pub struct McpServerConfig {
     /// Capability tags to assign to all tools from this server.
     #[serde(default = "default_mcp_tags")]
     pub tags: Vec<String>,
+
+    /// Require operator approval before any tool from this server runs.
+    #[serde(default = "default_true")]
+    pub requires_approval: bool,
+
+    /// Mark every tool from this server as safe. Defaults to false because
+    /// MCP metadata does not provide a portable safety classification.
+    #[serde(default)]
+    pub safe: bool,
 }
 
 fn default_mcp_transport_type() -> String {
@@ -418,7 +447,7 @@ fn default_mcp_enabled() -> bool {
 }
 
 fn default_mcp_tags() -> Vec<String> {
-    vec!["mcp".into(), "external".into(), "safe".into()]
+    vec!["mcp".into(), "external".into(), "dangerous".into()]
 }
 
 // ── Memory Config ───────────────────────────────────────────────────
@@ -594,7 +623,7 @@ pub struct SchedulerConfig {
     pub max_concurrent: u32,
 
     /// Database path for scheduler job persistence.
-    /// Defaults to `~/.odin/scheduler.db` if not set.
+    /// Defaults to `~/.raven-agent/scheduler.db` if not set.
     #[serde(default)]
     pub db_path: Option<String>,
 }

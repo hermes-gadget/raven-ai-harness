@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use odin_core::error::OdinResult;
+use odin_core::error::{OdinError, OdinResult};
 use odin_core::traits::{LoopEngine as LoopEngineTrait, LoopState, PhaseResult, Provider};
 use odin_core::types::*;
 use std::sync::Arc;
@@ -166,7 +166,9 @@ impl LoopEngineTrait for BaselineAgent {
         _phase: LoopPhase,
         _state: &mut LoopState,
     ) -> OdinResult<PhaseResult> {
-        unimplemented!("Baseline agent has no phases")
+        Err(OdinError::Other(
+            "The baseline comparison agent does not expose phase execution".into(),
+        ))
     }
 
     fn state_summary(&self) -> StateSummary {
@@ -257,7 +259,7 @@ mod tests {
             _tools: &[ToolSchema],
             _options: &CompletionOptions,
         ) -> OdinResult<Box<dyn ChatStream>> {
-            unimplemented!()
+            Err(OdinError::Other("mock provider does not stream".into()))
         }
 
         async fn health_check(&self) -> OdinResult<bool> {
@@ -401,8 +403,7 @@ mod tests {
 
         let baseline = BaselineAgent::new(mock.clone(), vec![], 10);
         let summary = baseline.state_summary();
-        assert!(!summary.goal.is_empty() || summary.current_phase != LoopPhase::Plan || true);
-        // Baseline always returns Plan phase with empty goal — this is expected
+        assert!(summary.goal.is_empty());
         assert_eq!(summary.current_phase, LoopPhase::Plan);
 
         // Verify the mock provider name

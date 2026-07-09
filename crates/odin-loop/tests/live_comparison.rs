@@ -1,12 +1,12 @@
 /// Live integration test — runs Raven against a real DeepSeek model.
 ///
-/// Reads DEEPSEEK_API_KEY from ~/.odin/.env (never committed to repo).
+/// Reads DEEPSEEK_API_KEY from the environment or a user config file.
 /// Compares looped engine vs baseline on real tasks with actual token counts.
 ///
 /// Usage:
 ///   DEEPSEEK_API_KEY=sk-... cargo test -p odin-loop --test live_comparison -- --nocapture
 ///
-/// Or create ~/.odin/.env with: DEEPSEEK_API_KEY=sk-...
+/// Or create ~/.config/raven/.env with: DEEPSEEK_API_KEY=sk-...
 ///
 /// Note: Uses a dedicated tokio runtime with shutdown_timeout to avoid
 /// the reqwest Client connection pool drain hanging test completion.
@@ -228,7 +228,9 @@ impl Provider for DeepSeekProvider {
         _tools: &[ToolSchema],
         _options: &CompletionOptions,
     ) -> OdinResult<Box<dyn ChatStream>> {
-        unimplemented!("Streaming not needed for comparison tests")
+        Err(odin_core::error::OdinError::Other(
+            "live comparison provider does not stream".into(),
+        ))
     }
 
     async fn health_check(&self) -> OdinResult<bool> {
@@ -249,17 +251,21 @@ fn load_api_key() -> Option<String> {
         return Some(key);
     }
 
-    // 2. Check ~/.odin/.env file
+    // 2. Check the canonical Raven path, then the legacy Odin path.
     let home = std::env::var("HOME").ok()?;
-    let env_path = std::path::PathBuf::from(home).join(".odin/.env");
-    if env_path.exists()
-        && let Ok(contents) = std::fs::read_to_string(&env_path)
-    {
-        for line in contents.lines() {
-            if let Some(key) = line.strip_prefix("DEEPSEEK_API_KEY=") {
-                let key = key.trim().trim_matches('"').trim_matches('\'');
-                if !key.is_empty() {
-                    return Some(key.to_string());
+    for env_path in [
+        std::path::PathBuf::from(&home).join(".config/raven/.env"),
+        std::path::PathBuf::from(home).join(".odin/.env"),
+    ] {
+        if env_path.exists()
+            && let Ok(contents) = std::fs::read_to_string(&env_path)
+        {
+            for line in contents.lines() {
+                if let Some(key) = line.strip_prefix("DEEPSEEK_API_KEY=") {
+                    let key = key.trim().trim_matches('"').trim_matches('\'');
+                    if !key.is_empty() {
+                        return Some(key.to_string());
+                    }
                 }
             }
         }
@@ -286,16 +292,12 @@ struct LiveRun {
 }
 
 #[tokio::test]
-#[ignore = "requires DEEPSEEK_API_KEY — set in env or ~/.odin/.env"]
+#[ignore = "requires DEEPSEEK_API_KEY — set in env or ~/.config/raven/.env"]
 async fn test_live_deepseek_comparison() {
-    let api_key = load_api_key().expect(
-        "DEEPSEEK_API_KEY not set. Export it or add to ~/.odin/.env:\n  DEEPSEEK_API_KEY=sk-...",
-    );
+    let api_key =
+        load_api_key().expect("DEEPSEEK_API_KEY not set. Export it or add to ~/.config/raven/.env");
 
-    eprintln!(
-        "✓ DeepSeek API key loaded (starts with: {}...)",
-        &api_key[..12]
-    );
+    eprintln!("DeepSeek API key loaded.");
 
     run_comparison(&api_key).await;
     eprintln!("[TEST] ✓ PASSED");

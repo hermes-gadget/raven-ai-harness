@@ -131,7 +131,9 @@ impl Provider for MockProvider {
         _tools: &[ToolSchema],
         _options: &CompletionOptions,
     ) -> OdinResult<Box<dyn ChatStream>> {
-        unimplemented!()
+        Err(odin_core::error::OdinError::Other(
+            "benchmark provider does not stream".into(),
+        ))
     }
 
     async fn health_check(&self) -> OdinResult<bool> {
@@ -144,7 +146,7 @@ fn bench_looped_vs_baseline(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("looped_vs_baseline");
 
-    // Benchmark the looped engine (no provider — stub mode, fast)
+    // Benchmark the looped engine in deterministic offline mode.
     group.bench_function("looped_engine", |b| {
         b.iter(|| {
             let engine = LoopEngine::new().with_max_iterations(5);

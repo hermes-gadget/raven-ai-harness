@@ -1,4 +1,4 @@
-//! Built-in tools for the Odin harness.
+//! Built-in tools for Raven Agent.
 //!
 //! This module provides the standard set of tools that every agent should
 //! have access to: file operations, shell commands, web operations, and git.

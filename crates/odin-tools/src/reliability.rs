@@ -1,4 +1,4 @@
-//! Per-tool reliability scoring for the Odin harness.
+//! Per-tool reliability scoring for Raven Agent.
 //!
 //! Tracks success/failure rates per tool, computes a reliability score (0.0–1.0),
 //! and exposes query methods for tool selection guidance.

@@ -2,11 +2,18 @@
 name = "odin-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
+default-run = "raven"
+autobins = false
+
+[[bin]]
+name = "raven"
+path = "src/main.rs"
 
 [[bin]]
 name = "odin"
-path = "src/main.rs"
+path = "src/bin/odin.rs"
 
 [dependencies]
 odin-core.workspace = true
@@ -21,6 +28,8 @@ odin-audit.workspace = true
 odin-memory.workspace = true
 odin-scheduler.workspace = true
 odin-skills.workspace = true
+odin-mcp.workspace = true
+odin-tui = { path = "../odin-tui" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -71,6 +71,7 @@ async fn test_skills_injected_via_loop_engine() {
         decomposer: GoalDecomposer::default(),
         summarizer: StateSummarizer::default(),
         plan: None,
+        model_name: String::new(),
         provider: None,
         escalation_provider: None,
         tool_registry: None,

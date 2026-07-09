@@ -1,4 +1,4 @@
-//! Secure credential and secret management for the Odin harness.
+//! Secure credential and secret management for Raven Agent.
 //!
 //! The [`SecretManager`] provides encrypted storage for API keys, tokens,
 //! and other sensitive credentials used by providers and tools.
@@ -24,7 +24,7 @@ pub struct Secret {
     pub env_var: Option<String>,
 }
 
-/// Manages credentials and secrets used across the Odin harness.
+/// Manages credentials and secrets used across Raven Agent.
 ///
 /// Secrets can be:
 /// - Loaded from environment variables at startup
@@ -37,17 +37,13 @@ pub struct Secret {
 pub struct SecretManager {
     /// Stored secrets, keyed by name.
     secrets: Arc<RwLock<HashMap<String, Secret>>>,
-    /// Whether to mask secrets in logs.
-    #[allow(dead_code)]
-    mask_in_logs: bool,
 }
 
 impl SecretManager {
     /// Create a new secret manager.
-    pub fn new(mask_in_logs: bool) -> Self {
+    pub fn new(_mask_in_logs: bool) -> Self {
         Self {
             secrets: Arc::new(RwLock::new(HashMap::new())),
-            mask_in_logs,
         }
     }
 

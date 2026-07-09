@@ -1,0 +1,29 @@
+[package]
+name = "odin-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Interactive terminal UI for Raven Agent — Claude Code-style chat + OpenCode-style side panel for live orchestration monitoring"
+
+[dependencies]
+odin-core.workspace = true
+odin-loop.workspace = true
+odin-mcp.workspace = true
+odin-orchestrator = { path = "../odin-orchestrator" }
+odin-providers.workspace = true
+odin-tools.workspace = true
+odin-permissions = { path = "../odin-permissions" }
+odin-audit.workspace = true
+odin-skills.workspace = true
+ratatui = "0.29"
+crossterm = "0.28"
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow = "1"
+async-trait.workspace = true
+shellexpand = "3"

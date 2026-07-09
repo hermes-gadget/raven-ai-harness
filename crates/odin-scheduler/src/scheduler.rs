@@ -1,4 +1,4 @@
-//! Scheduler — cron-like job scheduling for the Odin harness.
+//! Scheduler — cron-like job scheduling for Raven Agent.
 //!
 //! The [`Scheduler`] manages a collection of [`Job`]s, checks for
 //! due jobs on a configurable tick interval, and spawns tasks via
@@ -103,8 +103,8 @@ impl Scheduler {
 
     /// Add a job with a [`SchedulerJobConfig`] instead of a closure.
     ///
-    /// The job will be executed via the runtime (if configured) or
-    /// run a no-op task if no runtime is available.
+    /// The job will be executed via the configured runtime. Attempting to run
+    /// it without a runtime and registered agent returns an error.
     pub async fn add_job_with_config(
         &self,
         name: &str,
@@ -220,8 +220,25 @@ impl Scheduler {
                 "Running scheduled job"
             );
 
-            // Determine if this job should use the runtime or the closure
-            let use_runtime = self.runtime.is_some() && job.task_goal.is_some();
+            // Resolve a real runtime agent before recording the run. A configured
+            // runtime with no agent is an actionable error, not a successful no-op.
+            if job.task_goal.is_some() && self.runtime.is_none() {
+                return Err(OdinError::Config(format!(
+                    "Scheduled job '{}' requires a runtime, but none is configured",
+                    job.name
+                )));
+            }
+            let runtime_agent = if let (Some(runtime), Some(_)) = (&self.runtime, &job.task_goal) {
+                runtime.list_agents().first().map(|agent| agent.id)
+            } else {
+                None
+            };
+            if self.runtime.is_some() && job.task_goal.is_some() && runtime_agent.is_none() {
+                return Err(OdinError::Internal(format!(
+                    "Scheduled job '{}' cannot run because the runtime has no registered agent",
+                    job.name
+                )));
+            }
 
             // Update job state in memory
             {
@@ -249,7 +266,7 @@ impl Scheduler {
                 drop(jobs_guard);
             }
 
-            if use_runtime {
+            if let Some(agent_id) = runtime_agent {
                 // Runtime-driven execution path
                 let runtime = self.runtime.clone().unwrap();
                 let task_goal = job.task_goal.clone().unwrap();
@@ -257,7 +274,7 @@ impl Scheduler {
                 let jobs_clone = self.jobs.clone();
 
                 tokio::spawn(async move {
-                    debug!(task_id = %task_id, goal = %task_goal, "Job task starting via runtime");
+                    debug!(task_id = %task_id, "Job task starting via runtime");
 
                     // Create a minimal runtime task
                     let agent_task = odin_core::types::AgentTask {
@@ -270,7 +287,9 @@ impl Scheduler {
                         created_at: chrono::Utc::now(),
                     };
 
-                    let _ = runtime.submit_task(&task_id, &agent_task, None).await;
+                    if let Err(error) = runtime.submit_task(&agent_id, &agent_task, None).await {
+                        warn!(task_id = %task_id, "Scheduled runtime task failed: {error}");
+                    }
 
                     // Decrement running count
                     let mut jobs_guard = jobs_clone.write().await;
@@ -375,7 +394,7 @@ impl Scheduler {
 
                 for job_id in due_ids {
                     // Read job details under read lock
-                    let (task_fn, name, task_goal, _max_concurrent, _running_count) = {
+                    let (task_fn, name, task_goal, max_iterations) = {
                         let jobs_guard = jobs.read().await;
                         let job = match jobs_guard.get(&job_id) {
                             Some(j) => j,
@@ -393,9 +412,23 @@ impl Scheduler {
                             job.task.clone(),
                             job.name.clone(),
                             job.task_goal.clone(),
-                            job.max_concurrent,
-                            job.running_count,
+                            job.max_iterations,
                         )
+                    };
+
+                    let runtime_dispatch = match (runtime.as_ref(), task_goal.as_ref()) {
+                        (Some(runtime), Some(goal)) => match runtime.list_agents().first() {
+                            Some(agent) => Some((runtime.clone(), agent.id, goal.clone())),
+                            None => {
+                                warn!(job_id = %job_id, "Scheduled job skipped: runtime has no registered agent");
+                                continue;
+                            }
+                        },
+                        (None, Some(_)) => {
+                            warn!(job_id = %job_id, "Scheduled job skipped: no runtime is configured");
+                            continue;
+                        }
+                        _ => None,
                     };
 
                     let task_id = Uuid::new_v4();
@@ -432,14 +465,11 @@ impl Scheduler {
                         drop(jobs_guard);
                     }
 
-                    if let (Some(goal), Some(runtime)) = (task_goal, runtime.as_ref()) {
+                    if let Some((runtime, agent_id, goal)) = runtime_dispatch {
                         // Runtime-driven execution path in the loop
-                        let runtime = runtime.clone();
-                        let max_iters = 100; // default
                         let jobs_clone = jobs.clone();
-                        let _store = store.clone();
                         tokio::spawn(async move {
-                            debug!(task_id = %task_id, goal = %goal, "Job task started (loop, runtime)");
+                            debug!(task_id = %task_id, "Job task started (loop, runtime)");
 
                             let agent_task = odin_core::types::AgentTask {
                                 id: task_id,
@@ -447,11 +477,15 @@ impl Scheduler {
                                 context: None,
                                 sub_tasks: vec![],
                                 success_criteria: vec![],
-                                max_iterations: max_iters,
+                                max_iterations,
                                 created_at: chrono::Utc::now(),
                             };
 
-                            let _ = runtime.submit_task(&task_id, &agent_task, None).await;
+                            if let Err(error) =
+                                runtime.submit_task(&agent_id, &agent_task, None).await
+                            {
+                                warn!(task_id = %task_id, "Scheduled runtime task failed: {error}");
+                            }
 
                             let mut jobs_guard = jobs_clone.write().await;
                             if let Some(active) = jobs_guard.get_mut(&job_id) {
@@ -802,5 +836,24 @@ mod tests {
         assert_eq!(loaded[0].run_count, 1);
         assert!(loaded[0].last_run.is_some());
         assert!(loaded[0].next_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn configured_job_fails_without_runtime_instead_of_noop() {
+        let sched = Scheduler::default();
+        let id = sched
+            .add_job_with_config(
+                "runtime-required",
+                "* * * * *",
+                SchedulerJobConfig::new("perform real work"),
+            )
+            .await
+            .unwrap();
+        sched.jobs.write().await.get_mut(&id).unwrap().next_run =
+            Some(Utc::now() - chrono::TimeDelta::minutes(1));
+
+        let error = sched.run_pending().await.unwrap_err();
+        assert!(error.to_string().contains("requires a runtime"));
+        assert_eq!(sched.get_job(id).await.unwrap().run_count, 0);
     }
 }

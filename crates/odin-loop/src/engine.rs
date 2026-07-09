@@ -30,7 +30,7 @@ pub struct Engine {
     summarizer: StateSummarizer,
     /// Maximum total iterations across all phases
     max_iterations: u32,
-    /// Optional provider for LLM calls (phases use stubs if None)
+    /// Optional provider for model calls (phases use deterministic heuristics if absent)
     provider: Option<Arc<dyn Provider>>,
     /// Optional stronger provider for escalation (used when confidence is low)
     escalation_provider: Option<Arc<dyn Provider>>,
@@ -42,10 +42,12 @@ pub struct Engine {
     skill_registry: Option<Arc<odin_skills::SkillRegistry>>,
     /// Optional audit logger for recording tool calls and events
     audit_logger: Option<Arc<dyn AuditLogger>>,
+    /// Model name to pass to the provider (e.g., "deepseek-v4-pro", "gpt-4o")
+    model_name: String,
 }
 
 impl Engine {
-    /// Create a new loop engine with default settings (no LLM provider — stub mode).
+    /// Create a loop engine in offline heuristic mode until a provider is attached.
     pub fn new() -> Self {
         Self {
             confidence_scorer: ConfidenceScorer::default(),
@@ -58,12 +60,19 @@ impl Engine {
             policy_engine: None,
             skill_registry: None,
             audit_logger: None,
+            model_name: String::new(),
         }
     }
 
     /// Attach a model provider for real LLM calls.
     pub fn with_provider(mut self, provider: Arc<dyn Provider>) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    /// Set the model name to use for LLM calls (e.g., "deepseek-v4-pro").
+    pub fn with_model_name(mut self, name: impl Into<String>) -> Self {
+        self.model_name = name.into();
         self
     }
 
@@ -130,11 +139,7 @@ impl LoopEngineTrait for Engine {
     async fn execute_task(&self, task: &AgentTask) -> OdinResult<TaskResult> {
         let start = std::time::Instant::now();
 
-        tracing::info!(
-            "[LOOP] Starting task: {} (max iterations: {})",
-            task.goal,
-            task.max_iterations
-        );
+        tracing::info!(task_id = %task.id, max_iterations = task.max_iterations, "Starting agent loop");
 
         // Initialize loop state
         let mut state = LoopState {
@@ -175,6 +180,7 @@ impl LoopEngineTrait for Engine {
             decomposer: self.decomposer.clone(),
             summarizer: self.summarizer.clone(),
             plan: Some(plan.clone()),
+            model_name: self.model_name.clone(),
             provider: self.provider.clone(),
             escalation_provider: self.escalation_provider.clone(),
             tool_registry: self.tool_registry.clone(),
@@ -306,7 +312,7 @@ impl LoopEngineTrait for Engine {
             last_confidence.value() * 100.0
         );
 
-        tracing::info!("[LOOP] {}", summary);
+        tracing::info!(task_id = %task.id, success, iterations = state.iteration, "Agent loop finished");
 
         Ok(TaskResult {
             task_id: task.id,
@@ -335,6 +341,7 @@ impl LoopEngineTrait for Engine {
             decomposer: self.decomposer.clone(),
             summarizer: self.summarizer.clone(),
             plan: None,
+            model_name: self.model_name.clone(),
             provider: self.provider.clone(),
             escalation_provider: self.escalation_provider.clone(),
             tool_registry: self.tool_registry.clone(),
@@ -526,7 +533,7 @@ mod tests {
             _tools: &[ToolSchema],
             _options: &CompletionOptions,
         ) -> OdinResult<Box<dyn ChatStream>> {
-            unimplemented!()
+            Err(OdinError::Other("mock provider does not stream".into()))
         }
         async fn health_check(&self) -> OdinResult<bool> {
             Ok(true)
@@ -632,7 +639,7 @@ mod tests {
                 _tools: &[ToolSchema],
                 _options: &CompletionOptions,
             ) -> OdinResult<Box<dyn ChatStream>> {
-                unimplemented!()
+                Err(OdinError::Other("mock provider does not stream".into()))
             }
             async fn health_check(&self) -> OdinResult<bool> {
                 Ok(false)
@@ -680,7 +687,7 @@ mod tests {
                 _tools: &[ToolSchema],
                 _options: &CompletionOptions,
             ) -> OdinResult<Box<dyn ChatStream>> {
-                unimplemented!()
+                Err(OdinError::Other("mock provider does not stream".into()))
             }
             async fn health_check(&self) -> OdinResult<bool> {
                 Ok(true)
@@ -724,7 +731,7 @@ mod tests {
                 _tools: &[ToolSchema],
                 _options: &CompletionOptions,
             ) -> OdinResult<Box<dyn ChatStream>> {
-                unimplemented!()
+                Err(OdinError::Other("mock provider does not stream".into()))
             }
             async fn health_check(&self) -> OdinResult<bool> {
                 Ok(true)
@@ -904,7 +911,7 @@ mod tests {
                 _tools: &[ToolSchema],
                 _options: &CompletionOptions,
             ) -> OdinResult<Box<dyn ChatStream>> {
-                unimplemented!()
+                Err(OdinError::Other("mock provider does not stream".into()))
             }
 
             async fn health_check(&self) -> OdinResult<bool> {

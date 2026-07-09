@@ -1,7 +1,7 @@
 //! odin-mcp — Model Context Protocol (MCP) client infrastructure.
 //!
 //! This crate provides the foundation for loading external tools from MCP
-//! servers into the Odin agent harness. It includes:
+//! servers into Raven Agent. It includes:
 //!
 //! - **Transport**: `StdioTransport` for spawning MCP server subprocesses
 //!   and communicating via stdin/stdout with JSON-RPC 2.0.
@@ -48,7 +48,7 @@ pub mod tool_adapter;
 pub mod transport;
 pub mod types;
 
-/// MCP configuration types for use in Odin config.
+/// MCP configuration types for Raven Agent configuration.
 pub mod config {
     use serde::{Deserialize, Serialize};
 

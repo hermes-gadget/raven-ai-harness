@@ -2,12 +2,14 @@
 name = "odin-gateway"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
 odin-core.workspace = true
 odin-runtime.workspace = true
 odin-tools.workspace = true
+odin-permissions.workspace = true
 odin-orchestrator = { path = "../odin-orchestrator" }
 serde.workspace = true
 serde_json.workspace = true

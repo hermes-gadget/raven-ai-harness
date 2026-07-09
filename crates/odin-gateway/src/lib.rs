@@ -1,4 +1,4 @@
-//! Odin Gateway — External API layer for the Raven harness.
+//! Raven Agent gateway — HTTP, WebSocket, and Discord interfaces.
 //!
 //! Provides HTTP, Discord, and WebSocket interfaces for interacting
 //! with the Raven agent system.

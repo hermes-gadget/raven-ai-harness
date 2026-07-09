@@ -1,237 +1,203 @@
-# Raven Agent 🦅
+# Raven Agent
 
-**Multi-agent orchestration platform in Rust.** The composer/orchestrator delegates work to hidden sub-agents automatically, with structured looped LLM logic designed for smaller/local/cheaper models.
+Raven Agent is a Rust agent runtime with structured model loops, multi-agent task decomposition, persistent orchestration state, tools, skills, scheduling, memory, and HTTP, WebSocket, Discord, and terminal interfaces.
 
-> Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent), reimagined in Rust with multi-agent orchestration.
+Current workspace version: **0.3.0**.
 
-## Why Raven?
+The user-facing command is **raven**. Internal crates retain their historical **odin-\*** names; the **odin** binary remains as a compatibility alias.
+The GitHub repository still has the historical **raven-ai-harness** slug; this is a repository locator, not the product name.
 
-Most AI agent frameworks use a simple "call → tool → repeat" loop that works well with powerful models like Claude or GPT-4, but fails with smaller models. Raven wraps every model call in a structured **7-phase loop**, and splits complex work across **parallel sub-agents**:
+## Quick start
 
-```
-User → Composer → Task Graph → Sub-Agents (parallel) → Results → Merge → User
-            ↑         ↑              ↑
-         Intent    File Locks    Lifecycle (queued→running→done)
-```
+Prerequisites:
 
-This helps smaller models succeed through:
-- **Multi-agent orchestration** — one request spawns many sub-agents automatically
-- **Task graph execution** — parent goal → sub-goals → parallel agents → merged output
-- **File locking** — safe concurrent edits with queue and merge resolution
-- **Decomposition** — break complex goals into bite-sized sub-tasks
-- **Self-checking** — every output is scored for confidence
-- **State summaries** — compact context for limited windows
-- **Retry with escalation** — retry, then escalate to stronger models only when needed
-- **Verification** — validate results against success criteria
-- **Skills** — reusable markdown workflows loaded and injected automatically
+- Rust 1.85 or newer (the workspace uses Rust edition 2024)
+- A model provider configured through YAML
+- Provider credentials supplied through environment variables, not committed config values
 
-## Features
+~~~bash
+git clone https://github.com/hermes-gadget/raven-ai-harness.git
+cd raven-ai-harness
 
-- 🦀 **Pure Rust** — zero Python/JS in the core runtime
-- 🔄 **Looped agent engine** — 7-phase structured execution
-- 🤖 **Multi-agent orchestration** — Composer auto-delegates to parallel sub-agents
-- 📊 **Task graph** — parent goals → sub-goals → agents → files/tools → outputs
-- 🔒 **File locking** — safe concurrent edits with queue and merge resolution
-- 🔌 **Provider-agnostic** — OpenAI-compatible, Anthropic, local models, DeepSeek
-- 🔗 **Fallback chains** — weak→local→escalation with circuit breakers and health checks
-- 🛠️ **Tool system** — file ops, shell, web, git with safety boundaries
-- 📋 **Skill system** — reusable markdown-based workflows, auto-injected into agent context
-- 🧠 **Persistent memory** — SQLite-backed, semantic search
-- 🔒 **Safety-first** — permission engine, approval gates, secret redaction, audit trails
-- ⏰ **Persistent scheduler** — cron-style jobs survive restart via SQLite
-- 💬 **Discord gateway** — real serenity 0.12 integration with slash commands and permission gating
-- 🔌 **WebSocket gateway** — real-time task progress and events
-- 🌐 **HTTP API** — REST endpoints for integration
-- 📊 **Audit logs** — full traceability of every action
-- 🧪 **Thoroughly tested** — 300+ tests and growing
-- 🚀 **High performance** — <50MB idle, <100ms overhead per turn
+cargo build --workspace
 
-## Quick Start
+# Create the canonical config file, then edit it.
+cargo run -- config
+cargo run -- config --edit
 
-### Prerequisites
+# cargo run selects the raven binary and opens the TUI.
+cargo run
 
-- Rust 1.80+ (install via [rustup](https://rustup.rs))
+# Execute a goal with orchestration.
+cargo run -- run "review this repository and report concrete issues"
 
-### Install
+# Execute with one agent.
+cargo run -- run --direct "summarize README.md"
+~~~
 
-```bash
-# Clone the repo
-git clone https://github.com/hermes-gadget/raven-agent.git
-cd raven-agent
+To install only the primary command:
 
-# Build
-cargo build --release
+~~~bash
+cargo install --path crates/odin-cli --bin raven
+raven --help
+~~~
 
-# Orchestrate a goal with hidden sub-agents (default mode)
-cargo run -- orchestrate submit "fix the CLI bug, improve docs, add tests"
+## Configuration
 
-# Or use the run command (orchestrated by default)
-cargo run -- run "fix the CLI bug, improve docs, add tests for scheduler, and check provider fallback"
+The canonical path is **~/.config/raven/config.yaml**. **RAVEN_CONFIG** selects another path. Raven also reads **ODIN_CONFIG**, **~/.odin/config.yaml**, and **odin.yaml** / **odin.yml** as compatibility fallbacks.
 
-# Direct single-agent execution (legacy mode)
-cargo run -- run --direct "Create a hello world program in Python"
+Minimal local-provider configuration:
 
-# Start the HTTP API (also enables WebSocket at /ws)
-cargo run -- serve
-
-# List available skills
-cargo run -- skills list
-
-# Manage orchestration
-cargo run -- orchestrate status
-cargo run -- orchestrate agents
-cargo run -- orchestrate locks
-cargo run -- orchestrate queue
-
-# List configured providers
-cargo run -- providers list
-
-# Manage cron jobs (persistent via SQLite)
-cargo run -- schedule add "daily-report" "0 9 * * *" "Summarize recent changes"
-cargo run -- schedule list
-```
-
-### Configuration
-
-Create `~/.odin/config.yaml`:
-
-```yaml
+~~~yaml
 general:
   instance_name: raven
   log_level: info
 
 models:
-  default_provider: openai_compat
-  default_model: gpt-4o-mini
-  escalation_model: gpt-4o
+  default_provider: local
+  default_model: qwen2.5-coder
   providers:
-    openai_compat:
-      provider_type: openai_compat
-      base_url: https://api.openai.com/v1
-      api_key_env: OPENAI_API_KEY
-      fallback_chain: [anthropic, local]
-      circuit_breaker_threshold: 3
-    anthropic:
-      provider_type: anthropic
-      api_key_env: ANTHROPIC_API_KEY
     local:
       provider_type: openai_compat
       base_url: http://localhost:11434/v1
+      default_model: qwen2.5-coder
 
-agent:
-  max_iterations: 100
-  enable_decomposition: true
-  skills_dir: ~/.odin/skills
+safety:
+  require_approval: true
 
-gateway:
-  http_enabled: true
-  discord_enabled: false
-  ws_enabled: false
+tools:
+  path_boundary:
+    allowed_read: ["."]
+    allowed_write: ["."]
+    denied: [".git", ".env"]
+~~~
 
-scheduler:
-  enabled: false
-  check_interval_secs: 30
-```
+For a hosted provider, set **api_key_env** in YAML and export that environment variable. See [examples/config.yaml](examples/config.yaml) for the annotated schema.
 
-See [examples/config.yaml](examples/config.yaml) for the full annotated configuration.
+MCP tools are treated as unsafe and approval-required by default. A server can opt into **safe: true** and **requires_approval: false** only when its complete tool surface is trusted.
+
+## Commands
+
+| Command | Behavior |
+|---|---|
+| **raven** | Open the interactive terminal UI |
+| **raven run &lt;goal&gt;** | Decompose and execute a goal with sub-agents; persist graph, lifecycle, and lock state |
+| **raven run --direct &lt;goal&gt;** | Execute through one runtime agent |
+| **raven orchestrate submit &lt;goal&gt;** | Save a decomposed plan without executing it |
+| **raven orchestrate status** | List persisted run/plan IDs and lifecycle state |
+| **raven orchestrate inspect &lt;id&gt;** | Inspect a persisted graph or agent lifecycle |
+| **raven orchestrate cancel &lt;id&gt;** | Mark a stored graph or lifecycle cancelled |
+| **raven orchestrate pause / resume** | Change stored status markers; this does not signal another process |
+| **raven orchestrate agents / locks / queue / restore** | Inspect persisted orchestration data |
+| **raven serve** | Start the HTTP API; WebSocket upgrades are served at **/ws** |
+| **raven schedule add / list / remove / enable / disable** | Manage SQLite-backed scheduled job definitions |
+| **raven tools list / inspect / validate / doctor / catalog / reliability** | Inspect the built-in tool system |
+| **raven tools test &lt;name&gt; --dry-run** | Validate a tool call without executing it |
+| **raven tools test &lt;name&gt; --args &lt;json&gt; --approve** | Explicitly approve direct execution of a dangerous tool |
+| **raven skills list / tools** | Inspect markdown skills and their tool dependencies |
+| **raven providers list** | Show configured providers |
+| **raven tasks**, **raven sessions**, **raven audit replay** | Inspect audit-derived history |
+| **raven config**, **raven status**, **raven version** | Inspect local configuration and build information |
+
+Run **raven &lt;command&gt; --help** for arguments.
+
+## Terminal UI
+
+**raven** opens a chat-first terminal UI with an always-visible orchestration side panel on normal terminal widths:
+
+1. Chat
+2. Agents
+3. Task Graph
+4. Files/Locks
+5. Tools
+6. Logs/Audit
+7. Run and plan history
+8. Conflicts
+
+Entering a goal starts an in-process orchestration run, persists the graph/lifecycle/lock state, and streams status into the chat and side panel. The first feedback is shown immediately while the run is being created, decomposed, and wired to provider/tool resources. Active agents show heartbeat frames, current stage, current model/tool/lock wait, elapsed time, last event age, and the latest blocker or error. Model calls emit `waiting for model...` progress after 10 seconds, and the UI warns if no runner event arrives for 15 seconds.
+
+Follow-up chat messages steer the active run instead of creating disconnected fake runs. The TUI runner uses the configured provider fallback chain, permission policy, built-in and MCP tool registry, redacted audit logger, and configured provider HTTP timeouts. Runtime tracing for the TUI is written to `~/.raven-agent/tui.log` so logs do not corrupt the alternate-screen interface.
+
+| Key | Action |
+|---|---|
+| Enter | Submit a new goal, or steer the active run |
+| Shift+Enter / Alt+Enter | Insert a newline |
+| Tab / Shift+Tab | Move between tabs |
+| Alt+1 … Alt+8 | Select a tab |
+| Up, Down, PageUp, PageDown | Scroll |
+| Ctrl+F | Search the UI log |
+| ? | Toggle help |
+| Ctrl+D | Quit |
+| Esc | Close search/help, then quit |
+
+Chat commands:
+
+- **/pause** and **/resume** control the active in-process TUI run.
+- **/cancel** opens an approve/deny modal before cancelling the active run.
+- **/redirect &lt;text&gt;** steers pending work in the active run.
+- **/prio &lt;agent-id-prefix&gt; &lt;priority&gt;** reprioritises matching active agents.
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                    odin-cli (CLI)                         │
-├──────────────────────────────────────────────────────────┤
-│           odin-orchestrator (composer + task graph)       │
-├──────────────────────────────────────────────────────────┤
-│              odin-runtime (sub-agent pool)                 │
-├────┬────┬────┬────┬────┬────┬────┬───────────────┬────────┤
-│loop│prov│tool│mem │sched│perm│audit│  gateway     │ file   │
-│eng │ider│s   │ory │uler │issi│     │ HTTP+WS+Disc │ locks  │
-├────┴────┴────┴────┴────┴────┴────┴───────────────┴────────┤
-│              odin-skills (markdown workflows)              │
-├──────────────────────────────────────────────────────────┤
-│                 odin-core (types)                          │
-└──────────────────────────────────────────────────────────┘
-```
+~~~text
+raven CLI / TUI / HTTP / WebSocket / Discord
+                    |
+          composer + task graph
+                    |
+      runtime agents + seven-phase loop
+                    |
+ providers | tools | skills | permissions
+                    |
+ memory | scheduler | audit | SQLite state
+~~~
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for full details.
+The internal crate boundaries are:
 
-## The Looped Engine
+- **odin-core**: shared types, configuration, errors, and traits
+- **odin-loop**: PLAN → ACT → INSPECT → CRITIQUE → REVISE → VERIFY → DECIDE
+- **odin-orchestrator**: decomposition, task graphs, sub-agent lifecycle, locks, merge, persistence
+- **odin-runtime**: agents and sessions
+- **odin-providers**: OpenAI-compatible, Anthropic, local, and fallback providers
+- **odin-tools** and **odin-mcp**: built-in and external tools
+- **odin-permissions** and **odin-audit**: policy, approval decisions, redaction, and audit records
+- **odin-memory** and **odin-scheduler**: SQLite-backed memory and scheduled job definitions
+- **odin-gateway**: HTTP, WebSocket, and Discord
+- **odin-tui**: terminal UI, in-process orchestration runner, live state rendering, and run controls
 
-The core innovation: a structured agent loop that helps smaller models succeed.
+More detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 
-| Phase | What It Does | Small-Model Helper |
-|-------|-------------|-------------------|
-| **PLAN** | Decompose goal into sub-tasks, inject skills | Heuristic decomposer |
-| **ACT** | Execute tool or generate response | Schema validation |
-| **INSPECT** | Examine results, update state | State summarizer |
-| **CRITIQUE** | Self-evaluate, score confidence | Confidence scorer |
-| **REVISE** | Retry with adjusted approach | Escalation manager |
-| **VERIFY** | Check against success criteria | Schema validator |
-| **DECIDE** | Continue, stop, or escalate | Decision logic |
+## Safety behavior
 
-## CLI Commands
+- Tool execution goes through rate limits, explicit allow/deny rules, approval requirements, command checks, and path boundaries.
+- Calls fail closed when an approval-required tool has no approval responder.
+- Direct dangerous-tool testing requires **--approve**.
+- Unknown MCP tools are unsafe and approval-required by default.
+- Tool results, TUI logs, configuration display, and audit entries redact supported secret and PII patterns.
+- Audit redaction cannot be disabled, including by legacy **mask_secrets: false** configuration.
 
-| Command | Description |
-|---------|-------------|
-| `odin run <task>` | Execute a task through the agent loop |
-| `odin orchestrate <goal>` | Orchestrate with sub-agents (default mode) |
-| `odin serve` | Start HTTP + WebSocket API server |
-| `odin schedule add/list/remove/enable/disable` | Manage persistent cron jobs |
-| `odin skills list|tools` | List loaded skills with tool associations |
-| `odin tools list|inspect|validate|test|doctor|catalog|reliability` | Tool ecosystem management |
-| `odin providers list` | Show configured providers with health |
-| `odin config [--edit]` | View or edit configuration |
-| `odin status` | Runtime summary |
-| `odin version` | Show version information |
+## Known limitations
 
-## Hermes Compatibility
+- The TUI controls runs it starts in-process. **raven orchestrate pause/resume/cancel** still update persistent markers only and do not signal a separate process.
+- The HTTP and Discord orchestration submission endpoints create persisted plans. Task execution is available through **raven run**, HTTP **/chat**, and Discord **/raven run**.
+- **raven serve** also starts Discord when **gateway.discord_enabled** is true and a token is available from the configured value or environment variable.
+- The model loop still has no general interactive tool-call approval responder. The TUI currently approval-gates dangerous TUI actions such as cancellation; approval-required tool calls are denied unless policy explicitly allows them or approval requirements are disabled for a trusted environment.
+- Scheduler definitions persist, but a separate long-running scheduler process is required to execute due jobs continuously.
+- WebSocket clients receive task/orchestration events, but inbound pause/resume/cancel control messages are not dispatched.
+- Memory is attached to the direct runtime path; orchestrated sub-agent memory retrieval is not yet integrated.
 
-| Hermes Feature | Raven Agent | Notes |
-|---------------|------------|-------|
-| Multi-agent orchestration | ✅ Enhanced | Composer+TaskGraph auto-delegates to parallel sub-agents |
-| Persistent memory | ✅ | odin-memory (SQLite) |
-| Tools/Skills | ✅ | odin-tools + odin-skills (wired) |
-| Task planning | ✅ Improved | Looped PLAN phase + task graph decomposition |
-| File locking | ✅ New | FileLockManager with queue + merge resolution |
-| Discord | ✅ | serenity 0.12, slash commands |
-| WebSocket | ✅ | Real Axum WS, live task updates |
-| GitHub workflows | ✅ | CI/CD + git tools |
-| Cron scheduling | ✅ | odin-scheduler (SQLite persistent) |
-| Audit trails | ✅ | odin-audit (full lifecycle audit) |
-| Safety controls | ✅ | odin-permissions (redaction, approval, commands) |
-| Provider abstraction | ✅ Improved | Clean Rust traits + fallback chains |
-| Web dashboard | ⏳ v0.3 | Planned |
-| Telegram/Slack/etc | ⏳ v0.2+ | Discord first |
-
-Full compatibility notes: [docs/hermes-compatibility.md](docs/hermes-compatibility.md)
+Deferred work is tracked in [TODO.md](TODO.md) and repository issues.
 
 ## Development
 
-```bash
-# Run all tests
-cargo test --workspace
-
-# Run benchmarks
-cargo bench
-
-# Check compilation
-cargo check --workspace
-
-# Lint
-cargo clippy --workspace -- -D warnings
-
-# Format
+~~~bash
 cargo fmt --all -- --check
-
-# Build release
-cargo build --release
-```
+cargo clippy --workspace --all-targets -- -D warnings
+cargo check --workspace --all-targets
+cargo test --workspace --all-targets
+cargo bench --no-run
+scripts/validate-tools.sh
+~~~
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-## Acknowledgments
-
-Inspired by [Hermes Agent](https://github.com/NousResearch/hermes-agent) by Nous Research. Raven Agent builds on their multi-agent vision with structured loops, task graphs, file locking, and automatic sub-agent orchestration in Rust.
+MIT. See [LICENSE](LICENSE).

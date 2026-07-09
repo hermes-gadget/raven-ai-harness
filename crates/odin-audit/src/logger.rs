@@ -1,4 +1,4 @@
-//! Audit logger implementation for the Odin harness.
+//! Audit logger implementation for Raven Agent.
 //!
 //! Implements the [`AuditLogger`] trait from odin-core with support for:
 //! - JSON file logging
@@ -6,7 +6,7 @@
 //! - Querying by agent ID, session ID, and event type
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use odin_core::error::{OdinError, OdinResult};
 use odin_core::traits::AuditLogger;
 use odin_core::types::{AgentId, AuditEntry, AuditEventType, AuditResult, SessionId};
@@ -32,7 +32,8 @@ pub struct AuditLoggerConfig {
     pub json_format: bool,
     /// Maximum entries to keep in memory before flushing.
     pub buffer_size: usize,
-    /// Whether to mask secret values in log output.
+    /// Backward-compatible configuration field. Sensitive values are always
+    /// redacted; setting this to false no longer disables that safety boundary.
     pub mask_secrets: bool,
 }
 
@@ -53,8 +54,6 @@ impl Default for AuditLoggerConfig {
 #[derive(Debug, Clone)]
 struct BufferedEntry {
     entry: AuditEntry,
-    #[allow(dead_code)]
-    timestamp: DateTime<Utc>,
 }
 
 /// Implementation of the [`AuditLogger`] trait.
@@ -70,7 +69,7 @@ pub struct AuditLoggerImpl {
     buffer: Arc<RwLock<Vec<BufferedEntry>>>,
     /// File handle (opened lazily).
     file: Arc<Mutex<Option<std::fs::File>>>,
-    /// Secret/PII redactor, used when config.mask_secrets is true.
+    /// Secret/PII redactor applied to every audit entry.
     redactor: SecretRedactor,
 }
 
@@ -100,11 +99,7 @@ impl AuditLoggerImpl {
             None
         };
 
-        let redactor = if config.mask_secrets {
-            SecretRedactor::full()
-        } else {
-            SecretRedactor::secrets_only()
-        };
+        let redactor = SecretRedactor::full();
 
         Self {
             config,
@@ -215,10 +210,7 @@ impl AuditLoggerImpl {
 
     /// Add an audit entry to the in-memory buffer.
     async fn buffer_entry(&self, entry: AuditEntry) -> OdinResult<()> {
-        let buffered = BufferedEntry {
-            timestamp: Utc::now(),
-            entry,
-        };
+        let buffered = BufferedEntry { entry };
 
         {
             let mut buffer = self.buffer.write().await;
@@ -250,12 +242,9 @@ impl AuditLogger for AuditLoggerImpl {
             return Ok(());
         }
 
-        // Apply secret/PII redaction if configured.
-        let entry = if self.config.mask_secrets {
-            self.redact_entry(entry)
-        } else {
-            entry
-        };
+        // Audit data always crosses a durable boundary, so redaction cannot be
+        // disabled by configuration.
+        let entry = self.redact_entry(entry);
 
         debug!(
             event_type = %entry.event_type,
