@@ -161,11 +161,7 @@ impl Runtime {
             odin_core::error::OdinError::Internal(format!("Agent {agent_id} not found"))
         })?;
 
-        tracing::info!(
-            "[RUNTIME] Submitting task '{}' to agent '{}'",
-            task.goal,
-            agent.name
-        );
+        tracing::info!(task_id = %task.id, agent_id = %agent.id, "Submitting task to agent");
 
         let result = agent.execute_task(task).await?;
 
@@ -301,11 +297,23 @@ mod tests {
             _phase: LoopPhase,
             _state: &mut odin_core::traits::LoopState,
         ) -> OdinResult<odin_core::traits::PhaseResult> {
-            unimplemented!()
+            Err(odin_core::error::OdinError::Other(
+                "mock engine does not expose phases".into(),
+            ))
         }
 
         fn state_summary(&self) -> StateSummary {
-            unimplemented!()
+            StateSummary {
+                goal: String::new(),
+                current_phase: LoopPhase::Plan,
+                completed_steps: vec![],
+                pending_steps: vec![],
+                last_action: None,
+                last_result: None,
+                errors: vec![],
+                confidence: 1.0,
+                token_usage: TokenUsage::default(),
+            }
         }
 
         fn confidence(&self) -> ConfidenceScore {
@@ -330,7 +338,9 @@ mod tests {
             _tools: &[ToolSchema],
             _options: &CompletionOptions,
         ) -> OdinResult<ChatResponse> {
-            unimplemented!()
+            Err(odin_core::error::OdinError::Other(
+                "mock provider chat is not used".into(),
+            ))
         }
         async fn chat_stream(
             &self,
@@ -339,7 +349,9 @@ mod tests {
             _tools: &[ToolSchema],
             _options: &CompletionOptions,
         ) -> OdinResult<Box<dyn odin_core::traits::ChatStream>> {
-            unimplemented!()
+            Err(odin_core::error::OdinError::Other(
+                "mock provider does not stream".into(),
+            ))
         }
         async fn health_check(&self) -> OdinResult<bool> {
             Ok(true)

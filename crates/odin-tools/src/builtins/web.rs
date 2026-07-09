@@ -688,10 +688,10 @@ mod tests {
         });
         let result = req.execute(args, &test_context()).await;
         // Network may or may not be available — either is fine
-        if let Ok(res) = result {
-            if !res.success {
-                assert!(res.error.unwrap().contains("HTTP"));
-            }
+        if let Ok(res) = result
+            && !res.success
+        {
+            assert!(res.error.unwrap().contains("HTTP"));
         }
     }
 }

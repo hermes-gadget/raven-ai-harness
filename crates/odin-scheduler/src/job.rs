@@ -113,7 +113,7 @@ impl fmt::Debug for Job {
     }
 }
 
-/// Create a no-op task placeholder for use when deserialising persisted jobs.
+/// Create an inert task closure for use when deserialising persisted jobs.
 ///
 /// This is used internally when loading jobs from the store; the actual
 /// task (runtime-driven or closure-based) is set up by the scheduler.

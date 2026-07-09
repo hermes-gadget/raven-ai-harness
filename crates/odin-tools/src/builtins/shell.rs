@@ -305,13 +305,13 @@ mod tests {
     async fn test_shell_echo() {
         let shell = Shell::new();
         let args = serde_json::json!({
-            "command": "echo 'hello odin'",
+            "command": "echo 'hello raven'",
             "timeout_secs": 10
         });
         let result = shell.execute(args, &test_context()).await.unwrap();
         assert!(result.success, "STDERR: {:?}", result.error);
         assert!(
-            result.output.contains("hello odin"),
+            result.output.contains("hello raven"),
             "output: {}",
             result.output
         );

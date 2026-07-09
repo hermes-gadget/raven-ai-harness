@@ -23,8 +23,11 @@ pub fn create_provider(cfg: &ProviderConfig) -> OdinResult<Arc<dyn Provider>> {
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "https://api.openai.com/v1".into());
-            Ok(Arc::new(OpenAiCompatProvider::new(
-                "openai", base_url, api_key,
+            Ok(Arc::new(OpenAiCompatProvider::new_with_timeout(
+                "openai",
+                base_url,
+                api_key,
+                Some(cfg.timeout_secs),
             )))
         }
         "anthropic" => {

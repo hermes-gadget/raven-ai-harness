@@ -45,6 +45,10 @@ pub struct GatewayState {
     pub total_tool_errors: Arc<std::sync::atomic::AtomicU64>,
     /// Total requests served.
     pub total_requests: Arc<std::sync::atomic::AtomicU64>,
+    /// Optional WebSocket connection manager for broadcasting orchestration events.
+    pub ws_manager: Option<Arc<crate::ws::WsConnectionManager>>,
+    /// The live tool registry used by the task handler.
+    pub tool_registry: Arc<odin_tools::ToolRegistry>,
 }
 
 impl Default for GatewayState {
@@ -56,6 +60,8 @@ impl Default for GatewayState {
             total_tool_calls: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             total_tool_errors: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             total_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            ws_manager: None,
+            tool_registry: Arc::new(build_tool_registry(None)),
         }
     }
 }
@@ -70,8 +76,20 @@ impl GatewayState {
     pub fn is_ready(&self) -> bool {
         self.ready.load(std::sync::atomic::Ordering::Acquire)
     }
-}
 
+    /// Broadcast an orchestration event to all connected WebSocket clients.
+    pub fn broadcast_orchestration_event(&self, msg: &crate::ws::WsMessage) {
+        if let Some(ref mgr) = self.ws_manager {
+            let count = mgr.broadcast(msg);
+            if count > 0 {
+                tracing::debug!(
+                    "[GATEWAY] Broadcast orchestration event '{}' to {count} WS clients",
+                    msg.msg_type
+                );
+            }
+        }
+    }
+}
 // ── Request / Response Types ─────────────────────────────────────────
 
 /// Incoming chat or task request.
@@ -192,7 +210,7 @@ async fn health_handler(
     start_time: Arc<std::time::Instant>,
 ) -> Json<HealthResponse> {
     let uptime = start_time.elapsed().as_secs();
-    let tool_count = build_tool_registry(None).all_tools().len();
+    let tool_count = state.tool_registry.all_tools().len();
     Json(HealthResponse {
         status: if state.is_ready() { "ok" } else { "starting" }.into(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -244,7 +262,7 @@ async fn metrics_handler(
             .load(std::sync::atomic::Ordering::Acquire),
         total_tool_calls: tool_calls,
         total_tool_errors: tool_errors,
-        tool_count: build_tool_registry(None).all_tools().len(),
+        tool_count: state.tool_registry.all_tools().len(),
         tool_error_rate: error_rate,
     })
 }
@@ -469,8 +487,11 @@ struct ToolsQuery {
     tags: Option<String>,
 }
 
-async fn tools_list_handler(Query(query): Query<ToolsQuery>) -> Json<ToolsListResponse> {
-    let registry = build_tool_registry(None);
+async fn tools_list_handler(
+    state: Arc<GatewayState>,
+    Query(query): Query<ToolsQuery>,
+) -> Json<ToolsListResponse> {
+    let registry = &state.tool_registry;
     let schemas = registry.list_schemas();
 
     let filter_tags: Vec<String> = query
@@ -516,8 +537,11 @@ async fn tools_list_handler(Query(query): Query<ToolsQuery>) -> Json<ToolsListRe
 }
 
 /// GET /tools/:name — inspect one tool.
-async fn tool_inspect_handler(Path(name): Path<String>) -> impl IntoResponse {
-    let registry = build_tool_registry(None);
+async fn tool_inspect_handler(
+    state: Arc<GatewayState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let registry = &state.tool_registry;
 
     match registry.get(&name) {
         Some(tool) => {
@@ -547,9 +571,9 @@ async fn tool_inspect_handler(Path(name): Path<String>) -> impl IntoResponse {
 }
 
 /// POST /tools/validate — run validation and return JSON report.
-async fn tools_validate_handler() -> Json<ValidationReportResponse> {
-    let registry = build_tool_registry(None);
-    let reports = odin_tools::ToolValidator::validate_all(&registry);
+async fn tools_validate_handler(state: Arc<GatewayState>) -> Json<ValidationReportResponse> {
+    let registry = &state.tool_registry;
+    let reports = odin_tools::ToolValidator::validate_all(registry);
 
     let total = reports.len();
     let passed = reports.iter().filter(|r| r.failed.is_empty()).count();
@@ -564,9 +588,9 @@ async fn tools_validate_handler() -> Json<ValidationReportResponse> {
 }
 
 /// POST /tools/doctor — run a comprehensive doctor check on all tools.
-async fn tools_doctor_handler() -> Json<DoctorReportResponse> {
-    let registry = build_tool_registry(None);
-    let report = odin_tools::ToolDoctor::check(&registry);
+async fn tools_doctor_handler(state: Arc<GatewayState>) -> Json<DoctorReportResponse> {
+    let registry = &state.tool_registry;
+    let report = odin_tools::ToolDoctor::check(registry);
 
     Json(DoctorReportResponse {
         healthy: report.healthy,
@@ -590,9 +614,16 @@ async fn tools_doctor_handler() -> Json<DoctorReportResponse> {
 /// for every `/chat` request. Without one, the endpoint returns 503.
 ///
 /// Listens for SIGTERM/SIGINT and drains active tasks before shutting down.
-pub async fn run_http_server(addr: &str, task_handler: Option<TaskHandlerFn>) -> OdinResult<()> {
+pub async fn run_http_server(
+    addr: &str,
+    task_handler: Option<TaskHandlerFn>,
+    ws_manager: Option<Arc<crate::ws::WsConnectionManager>>,
+    tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
+) -> OdinResult<()> {
     let state: Arc<GatewayState> = Arc::new(GatewayState {
         task_handler,
+        ws_manager,
+        tool_registry: tool_registry.unwrap_or_else(|| Arc::new(build_tool_registry(None))),
         ..Default::default()
     });
     let start_time = Arc::new(std::time::Instant::now());
@@ -669,6 +700,21 @@ async fn graceful_shutdown_signal(state: Arc<GatewayState>) {
     tracing::info!("[GATEWAY] Shutdown complete");
 }
 
+// ── Orchestration Helpers ─────────────────────────────────────────────
+
+/// Get the Raven Agent state directory path.
+fn dirs_state_dir() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home).join(".raven-agent")
+}
+
+/// Get a path within the Raven Agent state directory.
+fn dirs_state_path(filename: &str) -> std::path::PathBuf {
+    let base = dirs_state_dir();
+    std::fs::create_dir_all(&base).ok();
+    base.join(filename)
+}
+
 // ── Orchestration API Types ──────────────────────────────────────────
 
 /// Request to orchestrate a goal with sub-agents.
@@ -688,6 +734,8 @@ fn default_max_iterations() -> u32 {
 /// Response from the orchestrate endpoint.
 #[derive(Debug, Clone, Serialize)]
 pub struct OrchestrateResponse {
+    /// The run ID for tracking this orchestration.
+    pub run_id: String,
     /// The original goal.
     pub goal: String,
     /// Number of sub-tasks created.
@@ -732,7 +780,7 @@ pub struct OrchestrateStatusResponse {
     pub complete: bool,
 }
 
-// ── Orchestration Handler ────────────────────────────────────────────
+// ── Orchestration Handlers ───────────────────────────────────────────
 
 /// POST /orchestrate — submit a goal for orchestration.
 async fn orchestrate_handler(
@@ -744,12 +792,13 @@ async fn orchestrate_handler(
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     use odin_orchestrator::Composer;
+    use odin_orchestrator::persistence::{OrchestrationStore, SqliteOrchestrationStore};
 
     let mut composer = Composer::default();
     composer.intake(&body.goal);
 
-    let graph = match composer.get_graph(&body.goal) {
-        Some(g) => g,
+    let mut graph = match composer.get_graph(&body.goal) {
+        Some(g) => g.clone(),
         None => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -760,15 +809,47 @@ async fn orchestrate_handler(
                 .into_response();
         }
     };
+    graph.status = odin_orchestrator::task_graph::TaskGraphStatus::Building;
+    let run_id = graph.id;
 
-    let groups = composer.detect_workstreams(graph);
+    let groups = composer.detect_workstreams(&graph);
+
+    // Persist the task graph to SQLite
+    let db_path = dirs_state_path("orchestration.db");
+    tracing::info!(run_id = %run_id, path = %db_path.display(), "Saving orchestration graph");
+    let store = match SqliteOrchestrationStore::new(&db_path).await {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::error!(path = %db_path.display(), %error, "Failed to open orchestration store");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Orchestration state is unavailable"})),
+            )
+                .into_response();
+        }
+    };
+    if let Err(error) = store.initialize().await {
+        tracing::error!(%error, "Failed to initialize orchestration store");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Orchestration state could not be initialized"})),
+        )
+            .into_response();
+    }
+    if let Err(error) = store.save_task_graph(&graph).await {
+        tracing::error!(%error, "Failed to persist orchestration graph");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Orchestration plan could not be persisted"})),
+        )
+            .into_response();
+    }
+    tracing::info!(run_id = %run_id, "Orchestration graph saved");
 
     let tasks: Vec<OrchestrateTaskInfo> = graph
         .nodes
         .values()
-        
         .map(|node| {
-            // Find which workstream group this node belongs to
             let ws_group = groups
                 .iter()
                 .position(|g| g.contains(&node.id))
@@ -786,7 +867,10 @@ async fn orchestrate_handler(
 
     let lock = composer.lock_summary();
 
+    let response_goal = body.goal.clone();
+
     let response = OrchestrateResponse {
+        run_id: run_id.to_string(),
         goal: body.goal,
         task_count: graph.nodes.len(),
         workstream_count: groups.len(),
@@ -797,6 +881,18 @@ async fn orchestrate_handler(
             queued_writers: lock.queued_writers,
         },
     };
+
+    // Broadcast orchestration started event to WebSocket clients
+    let run_id_str = run_id.to_string();
+    let task_count = graph.nodes.len();
+    let ws_count = groups.len();
+    state.broadcast_orchestration_event(&crate::ws::WsMessage::orchestrate_started(
+        &run_id_str,
+        &response_goal,
+        task_count,
+        ws_count,
+        None,
+    ));
 
     (StatusCode::OK, Json(response)).into_response()
 }
@@ -810,25 +906,202 @@ async fn orchestrate_status_handler(
         .total_requests
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    // In server mode, we'd look up the run from persistent state.
-    // For now, return a placeholder status.
-    let response = OrchestrateStatusResponse {
-        run_id,
-        goal: "unknown".into(),
-        total_tasks: 0,
-        tasks_done: 0,
-        tasks_running: 0,
-        tasks_failed: 0,
-        conflicts: vec![],
-        complete: false,
-    };
+    use odin_orchestrator::persistence::{OrchestrationStore, SqliteOrchestrationStore};
 
-    (StatusCode::OK, Json(response)).into_response()
+    let db_path = dirs_state_path("orchestration.db");
+    let store = match SqliteOrchestrationStore::new(&db_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to open store: {}", e)
+                })),
+            )
+                .into_response();
+        }
+    };
+    let _ = store.initialize().await;
+
+    match store.load_task_graph(&run_id).await {
+        Ok(graph) => {
+            let total = graph.nodes.len();
+            let done = graph
+                .nodes
+                .values()
+                .filter(|n| n.status == odin_orchestrator::task_graph::TaskNodeStatus::Done)
+                .count();
+            let failed = graph
+                .nodes
+                .values()
+                .filter(|n| n.status == odin_orchestrator::task_graph::TaskNodeStatus::Failed)
+                .count();
+            let running = total.saturating_sub(done + failed);
+            let complete = matches!(
+                graph.status,
+                odin_orchestrator::task_graph::TaskGraphStatus::Complete
+            );
+
+            let response = OrchestrateStatusResponse {
+                run_id: run_id.clone(),
+                goal: graph.root_goal,
+                total_tasks: total,
+                tasks_done: done,
+                tasks_running: running,
+                tasks_failed: failed,
+                conflicts: vec![],
+                complete,
+            };
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(_) => {
+            let response = OrchestrateStatusResponse {
+                run_id,
+                goal: "unknown".into(),
+                total_tasks: 0,
+                tasks_done: 0,
+                tasks_running: 0,
+                tasks_failed: 0,
+                conflicts: vec![],
+                complete: false,
+            };
+            (StatusCode::NOT_FOUND, Json(response)).into_response()
+        }
+    }
+}
+
+/// POST /orchestrate/:id/pause — pause an orchestration run.
+async fn orchestrate_pause_handler(
+    state: axum::extract::State<Arc<GatewayState>>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    state
+        .total_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    use odin_orchestrator::persistence::{OrchestrationStore, SqliteOrchestrationStore};
+
+    let db_path = dirs_state_path("orchestration.db");
+    match SqliteOrchestrationStore::new(&db_path).await {
+        Ok(store) => {
+            let _ = store.initialize().await;
+            match store.update_graph_status(&run_id, "paused").await {
+                Ok(()) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "paused",
+                        "run_id": run_id
+                    })),
+                )
+                    .into_response(),
+                Err(e) => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("Not found: {}", e)
+                    })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Store error: {}", e)
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /orchestrate/:id/resume — resume a paused orchestration run.
+async fn orchestrate_resume_handler(
+    state: axum::extract::State<Arc<GatewayState>>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    state
+        .total_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    use odin_orchestrator::persistence::{OrchestrationStore, SqliteOrchestrationStore};
+
+    let db_path = dirs_state_path("orchestration.db");
+    match SqliteOrchestrationStore::new(&db_path).await {
+        Ok(store) => {
+            let _ = store.initialize().await;
+            match store.update_graph_status(&run_id, "running").await {
+                Ok(()) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "resumed",
+                        "run_id": run_id
+                    })),
+                )
+                    .into_response(),
+                Err(e) => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("Not found: {}", e)
+                    })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Store error: {}", e)
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /orchestrate/:id/cancel — cancel an orchestration run.
+async fn orchestrate_cancel_handler(
+    state: axum::extract::State<Arc<GatewayState>>,
+    axum::extract::Path(run_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    state
+        .total_requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    use odin_orchestrator::persistence::{OrchestrationStore, SqliteOrchestrationStore};
+
+    let db_path = dirs_state_path("orchestration.db");
+    match SqliteOrchestrationStore::new(&db_path).await {
+        Ok(store) => {
+            let _ = store.initialize().await;
+            match store.update_graph_status(&run_id, "cancelled").await {
+                Ok(()) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "cancelled",
+                        "run_id": run_id
+                    })),
+                )
+                    .into_response(),
+                Err(e) => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": format!("Not found: {}", e)
+                    })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Store error: {}", e)
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// Build the Axum router, useful for embedding in larger apps.
 pub fn build_router(state: Arc<GatewayState>, start_time: Arc<std::time::Instant>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route(
             "/health",
             get({
@@ -856,29 +1129,29 @@ pub fn build_router(state: Arc<GatewayState>, start_time: Arc<std::time::Instant
         .route(
             "/tools",
             get({
-                let _st = state.clone();
-                move |query| tools_list_handler(query)
+                let st = state.clone();
+                move |query| tools_list_handler(st.clone(), query)
             }),
         )
         .route(
             "/tools/{name}",
             get({
-                let _st = state.clone();
-                move |path| tool_inspect_handler(path)
+                let st = state.clone();
+                move |path| tool_inspect_handler(st.clone(), path)
             }),
         )
         .route(
             "/tools/validate",
             post({
-                let _st = state.clone();
-                move || tools_validate_handler()
+                let st = state.clone();
+                move || tools_validate_handler(st.clone())
             }),
         )
         .route(
             "/tools/doctor",
             post({
-                let _st = state.clone();
-                move || tools_doctor_handler()
+                let st = state.clone();
+                move || tools_doctor_handler(st.clone())
             }),
         )
         .route(
@@ -895,6 +1168,40 @@ pub fn build_router(state: Arc<GatewayState>, start_time: Arc<std::time::Instant
                 move |path| orchestrate_status_handler(axum::extract::State(st.clone()), path)
             }),
         )
+        .route(
+            "/orchestrate/{id}/pause",
+            post({
+                let st = state.clone();
+                move |path| orchestrate_pause_handler(axum::extract::State(st.clone()), path)
+            }),
+        )
+        .route(
+            "/orchestrate/{id}/resume",
+            post({
+                let st = state.clone();
+                move |path| orchestrate_resume_handler(axum::extract::State(st.clone()), path)
+            }),
+        )
+        .route(
+            "/orchestrate/{id}/cancel",
+            post({
+                let st = state.clone();
+                move |path| orchestrate_cancel_handler(axum::extract::State(st.clone()), path)
+            }),
+        );
+
+    if let Some(manager) = state.ws_manager.clone() {
+        let config = Arc::new(crate::ws::WsConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        router = router.route(
+            "/ws",
+            get(move |ws| crate::ws::ws_handler(ws, manager.clone(), config.clone())),
+        );
+    }
+
+    router
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(tower_http::cors::CorsLayer::permissive())
 }
@@ -941,7 +1248,7 @@ mod tests {
     fn test_health_response_serde() {
         let resp = HealthResponse {
             status: "ok".into(),
-            version: "0.1.0".into(),
+            version: env!("CARGO_PKG_VERSION").into(),
             uptime_secs: 42,
             ready: true,
             dependencies: HealthDependencies {

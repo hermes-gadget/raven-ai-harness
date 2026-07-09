@@ -1,7 +1,7 @@
 //! Discord gateway — real serenity-based Discord bot.
 //!
 //! Provides:
-//! - Slash commands: `/odin run <task>`, `/odin status`, `/odin sessions`, `/odin tasks`
+//! - Slash commands: `/raven run <task>`, `/raven status`, `/raven sessions`, `/raven tasks`
 //! - Permission gating via configured admin role
 //! - Threaded task updates for long-running tasks
 //! - Graceful connection lifecycle (start / stop / is_connected)
@@ -26,28 +26,42 @@ pub struct DiscordConfig {
     pub enabled: bool,
     /// Discord bot token.
     pub token: Option<String>,
-    /// Role name required for privileged commands (e.g., "Odin Admin").
+    /// Role name required for privileged commands (e.g., "Raven Admin").
     /// If `None`, all users can use all commands.
     pub admin_role: Option<String>,
-    /// Command prefix for slash commands (default: "odin").
-    /// E.g. "odin" yields `/odin run`, `/odin status`, etc.
+    /// Command prefix for slash commands (default: "raven").
+    /// Existing configurations can keep `odin` as a compatibility prefix.
     pub command_prefix: Option<String>,
+    /// Path to the orchestration SQLite database.
+    /// When set, orchestration commands use real persistent state.
+    pub orchestration_db_path: Option<std::path::PathBuf>,
 }
 
 impl DiscordConfig {
-    /// The effective command prefix, falling back to "odin".
+    /// The effective command prefix, falling back to "raven".
     pub fn prefix(&self) -> &str {
-        self.command_prefix.as_deref().unwrap_or("odin")
+        self.command_prefix.as_deref().unwrap_or("raven")
     }
 }
 
 // ── Serenity Event Handler ───────────────────────────────────────────
 
-/// Internal event handler that wires slash commands to the Odin runtime.
+/// Internal event handler that wires slash commands to the Raven runtime.
 struct DiscordEventHandler {
     runtime: Arc<Runtime>,
     config: DiscordConfig,
     connected: Arc<AtomicBool>,
+}
+
+async fn send_discord_message(ctx: &Context, command: &CommandInteraction, content: String) {
+    let _ = ctx
+        .http
+        .send_message(
+            command.channel_id,
+            vec![],
+            &CreateMessage::new().content(content),
+        )
+        .await;
 }
 
 #[async_trait]
@@ -61,12 +75,12 @@ impl EventHandler for DiscordEventHandler {
         let prefix = self.config.prefix();
 
         let cmd = CreateCommand::new(prefix)
-            .description("Odin AI harness commands")
+            .description("Raven Agent — multi-agent AI orchestration commands")
             .add_option(
                 CreateCommandOption::new(
                     CommandOptionType::SubCommand,
                     "run",
-                    "Submit a task to the Odin runtime",
+                    "Submit a task to the Raven runtime",
                 )
                 .add_sub_option(
                     CreateCommandOption::new(
@@ -91,7 +105,80 @@ impl EventHandler for DiscordEventHandler {
                 CommandOptionType::SubCommand,
                 "tasks",
                 "List recent tasks",
-            ));
+            ))
+            // ── Orchestration subcommand group ────────────────────
+            .add_option(
+                CreateCommandOption::new(
+                    CommandOptionType::SubCommandGroup,
+                    "orchestrate",
+                    "Multi-agent orchestration commands",
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::SubCommand,
+                        "submit",
+                        "Submit a goal for multi-agent orchestration",
+                    )
+                    .add_sub_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "goal",
+                            "The goal to decompose and orchestrate",
+                        )
+                        .required(true),
+                    ),
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::SubCommand,
+                        "status",
+                        "Show orchestration run status",
+                    )
+                    .add_sub_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "run_id",
+                            "Optional run ID (shows all if omitted)",
+                        )
+                        .required(false),
+                    ),
+                )
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::SubCommand,
+                        "agents",
+                        "List sub-agents for a run",
+                    )
+                    .add_sub_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "run_id",
+                            "Run ID to list agents for",
+                        )
+                        .required(false),
+                    ),
+                )
+                .add_sub_option(CreateCommandOption::new(
+                    CommandOptionType::SubCommand,
+                    "locks",
+                    "Show file lock state",
+                ))
+                .add_sub_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::SubCommand,
+                        "cancel",
+                        "Cancel an orchestration run",
+                    )
+                    .add_sub_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "run_id",
+                            "Run ID to cancel",
+                        )
+                        .required(true),
+                    ),
+                ),
+            );
 
         match Command::set_global_commands(&ctx.http, vec![cmd]).await {
             Ok(cmds) => tracing::info!(
@@ -113,8 +200,19 @@ impl EventHandler for DiscordEventHandler {
             return;
         }
 
-        // Extract the subcommand from options
-        let sub_option = command.data.options.first().and_then(|opt| {
+        // Extract the subcommand (or subcommand group) from options
+        let first_opt = command.data.options.first();
+
+        // Check for subcommand group (orchestrate)
+        #[allow(clippy::collapsible_if)]
+        if let Some(opt) = first_opt {
+            if matches!(opt.kind(), CommandOptionType::SubCommandGroup) {
+                self.handle_orchestrate_group(ctx, &command, opt).await;
+                return;
+            }
+        }
+
+        let sub_option = first_opt.and_then(|opt| {
             if matches!(opt.kind(), CommandOptionType::SubCommand) {
                 Some(opt)
             } else {
@@ -238,7 +336,7 @@ impl DiscordEventHandler {
         }
     }
 
-    /// Handle `/odin run <task>` — submit a task to the runtime and post updates to a thread.
+    /// Handle `/raven run <task>` — submit a task to the runtime and post updates to a thread.
     async fn handle_run(&self, ctx: Context, command: CommandInteraction, task_goal: String) {
         let channel_id = command.channel_id;
 
@@ -409,7 +507,7 @@ impl DiscordEventHandler {
         });
     }
 
-    /// Handle `/odin status` / `/odin sessions` / `/odin tasks`.
+    /// Handle `/raven status` / `/raven sessions` / `/raven tasks`.
     async fn handle_list_command(
         &self,
         ctx: Context,
@@ -420,7 +518,7 @@ impl DiscordEventHandler {
             "status" => {
                 let s = self.runtime.summary();
                 format!(
-                    "**Odin Runtime Status**\n\
+                    "**Raven Agent Status**\n\
                      ────────────────\n\
                      👤 **Agents:** {}\n\
                      💬 **Sessions:** {}\n\
@@ -478,6 +576,453 @@ impl DiscordEventHandler {
                 CreateInteractionResponse::Message(
                     CreateInteractionResponseMessage::new().content(content),
                 ),
+            )
+            .await;
+    }
+
+    // ── Orchestration Handlers ─────────────────────────────────────────
+
+    /// Dispatch orchestration subcommand group.
+    async fn handle_orchestrate_group(
+        &self,
+        ctx: Context,
+        command: &CommandInteraction,
+        group_opt: &CommandDataOption,
+    ) {
+        // Extract subcommand from SubCommandGroup using pattern matching
+        let sub_opt = match &group_opt.value {
+            CommandDataOptionValue::SubCommandGroup(opts) => opts.first(),
+            _ => None,
+        };
+
+        let sub_opt = match sub_opt {
+            Some(opt) => opt,
+            None => {
+                let _ = command
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(
+                                    "Usage: /raven orchestrate submit|status|agents|locks|cancel",
+                                )
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        // Require admin for all orchestration commands
+        if let Err(msg) = self.check_admin_permission(&ctx, command).await {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content(msg)
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+
+        match sub_opt.name.as_str() {
+            "submit" => {
+                let goal = extract_option_string(sub_opt, "goal")
+                    .unwrap_or_else(|| "No goal provided".to_string());
+                self.handle_orchestrate_submit(ctx, command.clone(), goal)
+                    .await;
+            }
+            "status" => {
+                let run_id = extract_option_string(sub_opt, "run_id");
+                self.handle_orchestrate_status(ctx, command.clone(), run_id)
+                    .await;
+            }
+            "agents" => {
+                let run_id = extract_option_string(sub_opt, "run_id");
+                self.handle_orchestrate_agents(ctx, command.clone(), run_id)
+                    .await;
+            }
+            "locks" => {
+                self.handle_orchestrate_locks(ctx, command.clone()).await;
+            }
+            "cancel" => {
+                let run_id = extract_option_string(sub_opt, "run_id")
+                    .unwrap_or_else(|| "unknown".to_string());
+                self.handle_orchestrate_cancel(ctx, command.clone(), run_id)
+                    .await;
+            }
+            _ => {
+                let _ = command
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(format!(
+                                    "Unknown orchestrate subcommand: {}",
+                                    sub_opt.name
+                                ))
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    /// Create a SQLite orchestration store from config path.
+    async fn get_orchestration_store(
+        &self,
+    ) -> Option<odin_orchestrator::persistence::SqliteOrchestrationStore> {
+        let db_path = match &self.config.orchestration_db_path {
+            Some(p) => p.clone(),
+            None => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                std::path::PathBuf::from(home).join(".raven-agent/orchestration.db")
+            }
+        };
+
+        match odin_orchestrator::persistence::SqliteOrchestrationStore::new(&db_path).await {
+            Ok(store) => {
+                use odin_orchestrator::persistence::OrchestrationStore;
+                let _ = store.initialize().await;
+                Some(store)
+            }
+            Err(e) => {
+                tracing::warn!("[DISCORD] Failed to open orchestration store: {e}");
+                None
+            }
+        }
+    }
+
+    /// Handle `/raven orchestrate submit <goal>`.
+    async fn handle_orchestrate_submit(
+        &self,
+        ctx: Context,
+        command: CommandInteraction,
+        goal: String,
+    ) {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(
+                    CreateInteractionResponseMessage::new().ephemeral(true),
+                ),
+            )
+            .await;
+
+        let mut composer = odin_orchestrator::Composer::default();
+        composer.intake(&goal);
+
+        let mut graph = match composer.get_graph(&goal) {
+            Some(g) => g.clone(),
+            None => {
+                let _ = ctx
+                    .http
+                    .send_message(
+                        command.channel_id,
+                        vec![],
+                        &CreateMessage::new()
+                            .content("❌ Failed to decompose the goal into tasks."),
+                    )
+                    .await;
+                return;
+            }
+        };
+        graph.status = odin_orchestrator::task_graph::TaskGraphStatus::Building;
+
+        let groups = composer.detect_workstreams(&graph);
+
+        let run_id = graph.id;
+        if let Some(store) = self.get_orchestration_store().await {
+            use odin_orchestrator::persistence::OrchestrationStore;
+            let _ = store.save_task_graph(&graph).await;
+            tracing::info!("[DISCORD] Orchestration plan saved — run_id={}", run_id);
+        }
+
+        let task_count = graph.nodes.len();
+        let ws_count = groups.len();
+
+        let mut response = format!(
+            "🚀 **Orchestration Plan**\n\
+             **Run ID:** `{}`\n\
+             **Goal:** {}\n\
+             **Tasks:** {task_count} | **Workstreams:** {ws_count}\n\n\
+             **Tasks:**\n",
+            run_id, goal,
+        );
+
+        for node in graph.nodes.values() {
+            let files = if node.write_files.is_empty() && node.read_files.is_empty() {
+                String::new()
+            } else {
+                let mut f = String::from(" — edits: ");
+                f.push_str(&node.write_files.join(", "));
+                if !node.read_files.is_empty() {
+                    f.push_str(&format!(" | reads: {}", node.read_files.join(", ")));
+                }
+                f
+            };
+            response.push_str(&format!(
+                "• **{}** (p:{}){}\n",
+                node.goal, node.priority, files
+            ));
+        }
+
+        if response.len() > 1900 {
+            response.truncate(1900);
+            response.push_str("\n... *(truncated)*");
+        }
+
+        let _ = ctx
+            .http
+            .send_message(
+                command.channel_id,
+                vec![],
+                &CreateMessage::new().content(response),
+            )
+            .await;
+    }
+
+    /// Handle `/raven orchestrate status [run_id]`.
+    async fn handle_orchestrate_status(
+        &self,
+        ctx: Context,
+        command: CommandInteraction,
+        run_id: Option<String>,
+    ) {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(
+                    CreateInteractionResponseMessage::new().ephemeral(true),
+                ),
+            )
+            .await;
+
+        let store = match self.get_orchestration_store().await {
+            Some(s) => s,
+            None => {
+                let _ = ctx
+                    .http
+                    .send_message(
+                        command.channel_id,
+                        vec![],
+                        &CreateMessage::new().content("❌ Orchestration store not available."),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        use odin_orchestrator::persistence::OrchestrationStore;
+
+        let content = if let Some(ref rid) = run_id {
+            match store.load_task_graph(rid).await {
+                Ok(_graph) => {
+                    format!(
+                        "📊 **Run `{rid}`**\n\
+                         **Status:** persisted in SQLite\n\
+                         Use `raven orchestrate status` CLI for detailed output."
+                    )
+                }
+                Err(_) => format!("❌ Run `{rid}` not found in store."),
+            }
+        } else {
+            let graphs = store.list_task_graphs().await.unwrap_or_default();
+            if graphs.is_empty() {
+                "No orchestration runs found in store.".to_string()
+            } else {
+                let mut lines = vec!["**Orchestration Runs**".to_string()];
+                for g in &graphs {
+                    lines.push(format!(
+                        "• `{}` — {} nodes — **{}**",
+                        g.run_id, g.node_count, g.status
+                    ));
+                }
+                lines.join("\n")
+            }
+        };
+
+        let _ = ctx
+            .http
+            .send_message(
+                command.channel_id,
+                vec![],
+                &CreateMessage::new().content(content),
+            )
+            .await;
+    }
+
+    /// Handle `/raven orchestrate agents [run_id]`.
+    async fn handle_orchestrate_agents(
+        &self,
+        ctx: Context,
+        command: CommandInteraction,
+        run_id: Option<String>,
+    ) {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(
+                    CreateInteractionResponseMessage::new().ephemeral(true),
+                ),
+            )
+            .await;
+
+        let content = if let Some(ref rid) = run_id {
+            let store = match self.get_orchestration_store().await {
+                Some(s) => s,
+                None => {
+                    let _ = ctx
+                        .http
+                        .send_message(
+                            command.channel_id,
+                            vec![],
+                            &CreateMessage::new().content("❌ Orchestration store not available."),
+                        )
+                        .await;
+                    return;
+                }
+            };
+
+            use odin_orchestrator::persistence::OrchestrationStore;
+            let graph = match store.load_task_graph(rid).await {
+                Ok(graph) => graph,
+                Err(_) => {
+                    return send_discord_message(
+                        &ctx,
+                        &command,
+                        format!("Run `{rid}` was not found."),
+                    )
+                    .await;
+                }
+            };
+            let agent_ids: std::collections::HashSet<String> = graph
+                .nodes
+                .values()
+                .filter_map(|node| node.agent_id.map(|id| id.to_string()))
+                .collect();
+            let lifecycles = store.list_agent_lifecycles().await.unwrap_or_default();
+            let run_lifecycles: Vec<_> = lifecycles
+                .iter()
+                .filter(|lc| agent_ids.contains(&lc.agent_id))
+                .collect();
+
+            if run_lifecycles.is_empty() {
+                format!("No sub-agents found for run `{rid}`.")
+            } else {
+                let mut lines = vec![format!("**Sub-Agents for Run `{rid}`**")];
+                for lc in &run_lifecycles {
+                    let icon = match lc.phase.as_str() {
+                        "running" => "🟢",
+                        "done" => "✅",
+                        "failed" => "❌",
+                        "paused" => "⏸️",
+                        "cancelled" => "🚫",
+                        _ => "⏳",
+                    };
+                    lines.push(format!("{icon} `{}` — {}", lc.agent_id, lc.phase));
+                }
+                lines.join("\n")
+            }
+        } else {
+            "Usage: `/raven orchestrate agents run_id:<run_id>`".to_string()
+        };
+
+        let _ = ctx
+            .http
+            .send_message(
+                command.channel_id,
+                vec![],
+                &CreateMessage::new().content(content),
+            )
+            .await;
+    }
+
+    /// Handle `/raven orchestrate locks`.
+    async fn handle_orchestrate_locks(&self, ctx: Context, command: CommandInteraction) {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(
+                    CreateInteractionResponseMessage::new().ephemeral(true),
+                ),
+            )
+            .await;
+
+        use odin_orchestrator::persistence::OrchestrationStore;
+        let content = match self.get_orchestration_store().await {
+            Some(store) => match store.load_lock_snapshot().await {
+                Ok(Some(snapshot)) => {
+                    let redacted = odin_permissions::SecretRedactor::full().redact(&snapshot);
+                    let preview: String = redacted.chars().take(1500).collect();
+                    format!("🔒 **Latest Persisted Lock Snapshot**\n```json\n{preview}\n```")
+                }
+                Ok(None) => "No lock snapshot has been persisted. `raven orchestrate locks` shows declared file access from stored graphs.".to_string(),
+                Err(error) => format!("Could not read lock state: {error}"),
+            },
+            None => "Orchestration store not available.".to_string(),
+        };
+
+        let _ = ctx
+            .http
+            .send_message(
+                command.channel_id,
+                vec![],
+                &CreateMessage::new().content(content),
+            )
+            .await;
+    }
+
+    /// Handle `/raven orchestrate cancel <run_id>`.
+    async fn handle_orchestrate_cancel(
+        &self,
+        ctx: Context,
+        command: CommandInteraction,
+        run_id: String,
+    ) {
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(
+                    CreateInteractionResponseMessage::new().ephemeral(true),
+                ),
+            )
+            .await;
+
+        let store = match self.get_orchestration_store().await {
+            Some(s) => s,
+            None => {
+                let _ = ctx
+                    .http
+                    .send_message(
+                        command.channel_id,
+                        vec![],
+                        &CreateMessage::new().content("❌ Orchestration store not available."),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        use odin_orchestrator::persistence::OrchestrationStore;
+        let result = store.update_graph_status(&run_id, "cancelled").await;
+
+        let content = match result {
+            Ok(_) => format!("🚫 Orchestration run `{run_id}` has been **cancelled**."),
+            Err(e) => format!("❌ Failed to cancel run `{run_id}`: {e}"),
+        };
+
+        let _ = ctx
+            .http
+            .send_message(
+                command.channel_id,
+                vec![],
+                &CreateMessage::new().content(content),
             )
             .await;
     }
@@ -610,22 +1155,11 @@ impl DiscordGateway {
             ));
         }
 
-        // We don't have direct access to the HTTP client here since the
-        // serenity client holds it. This is a best-effort implementation.
-        // In actual usage, send messages through the event handler.
-        tracing::info!(
-            "[DISCORD] Would send message to channel '{}': {}",
-            channel_id,
-            content
-        );
-
-        // Since we can't easily pass the Http client back to the gateway
-        // (the Client owns it), we log the intent. For slash command responses,
-        // messages are sent from within the event handler.
-        //
-        // To send messages externally, the caller should use a separate
-        // serenity HTTP client initialized with the bot token.
-        Ok(())
+        let _ = (channel_id, content);
+        Err(OdinError::Network(
+            "Direct Discord sends are unavailable on a running gateway; use DiscordGateway::send_message_raw with an authorized token"
+                .into(),
+        ))
     }
 
     /// Send a message to a Discord channel using a raw token (stateless).
@@ -683,6 +1217,16 @@ fn extract_subcommand_string(options: &[CommandDataOption], name: &str) -> Optio
     None
 }
 
+/// Extract a string value from a CommandDataOption's sub-options.
+/// Looks for a String-typed option with the given name.
+fn extract_option_string(opt: &CommandDataOption, name: &str) -> Option<String> {
+    match &opt.value {
+        CommandDataOptionValue::SubCommand(sub_opts) => extract_subcommand_string(sub_opts, name),
+        CommandDataOptionValue::String(s) if opt.name == name => Some(s.clone()),
+        _ => None,
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -701,7 +1245,7 @@ mod tests {
     #[test]
     fn test_discord_config_prefix_default() {
         let config = DiscordConfig::default();
-        assert_eq!(config.prefix(), "odin");
+        assert_eq!(config.prefix(), "raven");
     }
 
     #[test]
@@ -742,6 +1286,7 @@ mod tests {
             token: None,
             admin_role: None,
             command_prefix: None,
+            orchestration_db_path: None,
         };
         let runtime = Arc::new(Runtime::new());
         let gateway = DiscordGateway::new(config, runtime);
@@ -759,6 +1304,7 @@ mod tests {
             token: Some("fake.token.here".into()),
             admin_role: None,
             command_prefix: None,
+            orchestration_db_path: None,
         };
         let runtime = Arc::new(Runtime::new());
         let gateway = DiscordGateway::new(config, runtime);

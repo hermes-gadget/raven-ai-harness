@@ -1,12 +1,13 @@
 //! Individual loop phase implementations.
 //!
-//! Each phase is a self-contained function that transforms loop state.
-//! For production use, phases would call the model provider for LLM-guided
-//! execution. The implementations here provide the structure and hooks.
+//! Each phase is a self-contained function that transforms loop state, using
+//! a configured provider when present and deterministic heuristics otherwise.
 
 use async_trait::async_trait;
 use odin_core::error::OdinResult;
-use odin_core::traits::{AuditLogger, LoopState, PhaseRecord, PhaseResult, Provider, ToolContext};
+use odin_core::traits::{
+    AuditLogger, LoopState, PermissionEngine, PhaseRecord, PhaseResult, Provider, ToolContext,
+};
 use odin_core::types::*;
 use odin_permissions::SecretRedactor;
 use std::sync::Arc;
@@ -34,6 +35,8 @@ pub struct PhaseContext {
     pub decomposer: GoalDecomposer,
     pub summarizer: StateSummarizer,
     pub plan: Option<DecomposedPlan>,
+    /// Model name to pass to the provider (e.g., "deepseek-v4-pro")
+    pub model_name: String,
     /// Optional LLM provider for real model calls
     pub provider: Option<Arc<dyn Provider>>,
     /// Optional stronger provider for escalation
@@ -69,7 +72,7 @@ impl Phase for PlanPhase {
         state: &mut LoopState,
         context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
-        tracing::info!("[PLAN] Planning for task: {}", state.task.goal);
+        tracing::info!(task_id = %state.task.id, "Planning task");
 
         // Inject available skills into the system prompt if a registry is loaded
         if let Some(ref registry) = context.skill_registry {
@@ -96,10 +99,11 @@ impl Phase for PlanPhase {
                 // Append to the first system message
                 if let Some(first) = state.messages.first_mut()
                     && first.role == Role::System
-                    && let MessageContent::Text { content } = &mut first.content {
-                        content.push_str("\n\n");
-                        content.push_str(&skills_prompt);
-                    }
+                    && let MessageContent::Text { content } = &mut first.content
+                {
+                    content.push_str("\n\n");
+                    content.push_str(&skills_prompt);
+                }
             }
         }
 
@@ -109,7 +113,12 @@ impl Phase for PlanPhase {
             let mut msgs = state.messages.clone();
             msgs.push(Message::user(prompt));
             match provider
-                .chat("", &msgs, &[], &CompletionOptions::default())
+                .chat(
+                    &context.model_name,
+                    &msgs,
+                    &[],
+                    &CompletionOptions::default(),
+                )
                 .await
             {
                 Ok(response) => {
@@ -151,8 +160,8 @@ impl Phase for PlanPhase {
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("[PLAN] LLM call failed: {}", e);
+                Err(_error) => {
+                    tracing::warn!("Planning model call failed; using heuristic decomposition");
                     self.decomposer.decompose_heuristic(&state.task.goal)
                 }
             }
@@ -241,7 +250,16 @@ impl Phase for ActPhase {
                 ..Default::default()
             };
 
-            match provider.chat("", &msgs, &[], &options).await {
+            let tool_schemas: Vec<ToolSchema> = context
+                .tool_registry
+                .as_ref()
+                .map(|r| r.list_schemas())
+                .unwrap_or_default();
+
+            match provider
+                .chat(&context.model_name, &msgs, &tool_schemas, &options)
+                .await
+            {
                 Ok(response) => {
                     let text = response.message.text().unwrap_or("").to_string();
                     let calls = response.message.tool_calls().to_vec();
@@ -295,78 +313,134 @@ impl Phase for ActPhase {
                                         }
                                     };
 
-                                // Check policy engine before executing tool
-                                let policy_denied = if let Some(ref policy) = context.policy_engine
-                                {
-                                    // For shell tools: check dangerous commands
-                                    if tool_name == "shell" {
-                                        if let Some(cmd) =
-                                            args.get("command").and_then(|v| v.as_str())
-                                        {
-                                            policy.is_dangerous_command(cmd)
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    // For file_write: check path boundaries
-                                    else if tool_name == "file_write" {
-                                        if let Some(path) =
-                                            args.get("path").and_then(|v| v.as_str())
-                                        {
-                                            policy
-                                                .check_path_boundary(
-                                                    std::path::Path::new(path),
-                                                    true,
-                                                )
-                                                .is_err()
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    // For file_read: check path boundaries
-                                    else if tool_name == "file_read" {
-                                        if let Some(path) =
-                                            args.get("path").and_then(|v| v.as_str())
-                                        {
-                                            policy
-                                                .check_path_boundary(
-                                                    std::path::Path::new(path),
-                                                    false,
-                                                )
-                                                .is_err()
-                                        } else {
-                                            false
-                                        }
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                };
-
-                                if policy_denied {
-                                    let tr = ToolResult {
-                                        call_id: tc.id.clone(),
-                                        tool_name: tool_name.clone(),
-                                        success: false,
-                                        output: String::new(),
-                                        error: Some(format!(
-                                            "Permission denied: tool '{}' blocked by policy",
-                                            tool_name
-                                        )),
-                                        duration_ms: 0,
-                                        timestamp: chrono::Utc::now(),
-                                    };
-                                    results.push(tr);
-                                    continue;
-                                }
-
                                 let tool_context = ToolContext {
                                     agent_id: uuid::Uuid::default(),
                                     session_id: uuid::Uuid::default(),
                                     working_dir: std::env::current_dir().unwrap_or_default(),
                                     env: std::collections::HashMap::new(),
                                 };
+
+                                // Enforce rate limits, explicit policy rules, approval gates,
+                                // dangerous-command checks, and filesystem boundaries before
+                                // calling any tool implementation.
+                                let policy_error = if let Some(ref policy) = context.policy_engine {
+                                    let mut error = None;
+
+                                    match policy
+                                        .check_rate_limit(tool_context.agent_id, &tool_name)
+                                        .await
+                                    {
+                                        Ok(true) => {}
+                                        Ok(false) => {
+                                            error = Some(format!(
+                                                "Rate limit exceeded for tool '{tool_name}'"
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            error = Some(format!("Rate-limit check failed: {e}"))
+                                        }
+                                    }
+
+                                    let action = if error.is_none() {
+                                        match policy
+                                            .check_tool(tool_context.agent_id, &tool_name, &args)
+                                            .await
+                                        {
+                                            Ok(action) => Some(action),
+                                            Err(e) => {
+                                                error =
+                                                    Some(format!("Permission check failed: {e}"));
+                                                None
+                                            }
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(PermissionAction::Deny) = action {
+                                        error = Some(format!(
+                                            "Tool '{tool_name}' is denied by the permission policy"
+                                        ));
+                                    }
+
+                                    let needs_approval =
+                                        matches!(action, Some(PermissionAction::AskUser))
+                                            || (matches!(action, Some(PermissionAction::Allow))
+                                                && tool.requires_approval()
+                                                && policy.requires_approval());
+                                    if error.is_none() && needs_approval {
+                                        match policy
+                                            .request_approval(
+                                                tool_context.agent_id,
+                                                &tool_name,
+                                                &args.to_string(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(true) => {}
+                                            Ok(false) => {
+                                                error = Some(format!(
+                                                    "Approval required for tool '{tool_name}', but the action was not approved"
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                error =
+                                                    Some(format!("Approval request failed: {e}"));
+                                            }
+                                        }
+                                    }
+
+                                    if error.is_none()
+                                        && tool_name == "shell"
+                                        && let Some(command) =
+                                            args.get("command").and_then(|value| value.as_str())
+                                        && matches!(
+                                            policy
+                                                .check_command(tool_context.agent_id, command)
+                                                .await,
+                                            Ok(PermissionAction::AskUser | PermissionAction::Deny)
+                                        )
+                                    {
+                                        error = Some(
+                                            "Dangerous shell command requires explicit approval"
+                                                .to_string(),
+                                        );
+                                    }
+
+                                    if error.is_none()
+                                        && matches!(tool_name.as_str(), "file_read" | "file_write")
+                                        && let Some(path) =
+                                            args.get("path").and_then(|value| value.as_str())
+                                        && let Err(e) = policy.check_path_boundary(
+                                            std::path::Path::new(path),
+                                            tool_name == "file_write",
+                                        )
+                                    {
+                                        error = Some(e.to_string());
+                                    }
+
+                                    error
+                                } else if tool.requires_approval() {
+                                    Some(format!(
+                                        "Tool '{tool_name}' requires approval, but no permission engine is configured"
+                                    ))
+                                } else {
+                                    None
+                                };
+
+                                if let Some(error) = policy_error {
+                                    let tr = ToolResult {
+                                        call_id: tc.id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        success: false,
+                                        output: String::new(),
+                                        error: Some(error),
+                                        duration_ms: 0,
+                                        timestamp: chrono::Utc::now(),
+                                    };
+                                    results.push(tr);
+                                    continue;
+                                }
 
                                 let start = std::time::Instant::now();
                                 // Capture input summary before moving args into execute
@@ -392,13 +466,11 @@ impl Phase for ActPhase {
 
                                 // Audit log the tool call
                                 if let Some(ref audit_logger) = context.audit_logger {
-                                    let permission_decision =
-                                        if policy_denied { "denied" } else { "allowed" };
                                     let details = serde_json::json!({
                                         "input_summary": input_summary,
                                         "result": if tr.success { "success" } else { "failure" },
                                         "duration_ms": tr.duration_ms,
-                                        "permission_decision": permission_decision,
+                                        "permission_decision": "allowed",
                                     });
                                     let audit_entry = AuditEntry {
                                         id: uuid::Uuid::new_v4(),
@@ -421,18 +493,18 @@ impl Phase for ActPhase {
                             }
                             results
                         } else {
-                            // No tool registry — simulate results
+                            // A model requested tools that this engine cannot dispatch.
                             calls
                                 .iter()
                                 .map(|tc| ToolResult {
                                     call_id: tc.id.clone(),
                                     tool_name: tc.function.name.clone(),
-                                    success: true,
-                                    output: format!(
-                                        "[Simulated] Executed {} with args: {}",
-                                        tc.function.name, tc.function.arguments
-                                    ),
-                                    error: None,
+                                    success: false,
+                                    output: String::new(),
+                                    error: Some(format!(
+                                        "Tool '{}' cannot run because no tool registry is configured",
+                                        tc.function.name
+                                    )),
                                     duration_ms: 0,
                                     timestamp: chrono::Utc::now(),
                                 })
@@ -460,7 +532,7 @@ impl Phase for ActPhase {
                 }
             }
         } else {
-            // Stub mode — no provider attached
+            // Offline heuristic mode — no provider attached.
             let pending = context.plan.as_ref().and_then(|p| {
                 p.sub_tasks
                     .iter()
@@ -625,7 +697,12 @@ impl Phase for CritiquePhase {
             let mut msgs = state.messages.clone();
             msgs.push(Message::user(prompt));
             match provider
-                .chat("", &msgs, &[], &CompletionOptions::default())
+                .chat(
+                    &context.model_name,
+                    &msgs,
+                    &[],
+                    &CompletionOptions::default(),
+                )
                 .await
             {
                 Ok(response) => {
@@ -644,8 +721,8 @@ impl Phase for CritiquePhase {
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("[CRITIQUE] LLM call failed: {}", e);
+                Err(_error) => {
+                    tracing::warn!("Critique model call failed; using heuristic scoring");
                     fallback_critique_confidence(state, &self.scorer)
                 }
             }
@@ -736,7 +813,12 @@ impl Phase for RevisePhase {
             let mut msgs = state.messages.clone();
             msgs.push(Message::user(prompt));
             match provider
-                .chat("", &msgs, &[], &CompletionOptions::default())
+                .chat(
+                    &context.model_name,
+                    &msgs,
+                    &[],
+                    &CompletionOptions::default(),
+                )
                 .await
             {
                 Ok(response) => {
@@ -744,8 +826,8 @@ impl Phase for RevisePhase {
                     tracing::info!("[REVISE] LLM revision suggestion received");
                     text
                 }
-                Err(e) => {
-                    tracing::warn!("[REVISE] LLM call failed: {}", e);
+                Err(_error) => {
+                    tracing::warn!("Revision model call failed; using heuristic strategy");
                     fallback_revise_strategy(state.retry_count)
                 }
             }
@@ -852,7 +934,12 @@ impl Phase for VerifyPhase {
             let mut msgs = state.messages.clone();
             msgs.push(Message::user(prompt));
             match provider
-                .chat("", &msgs, &[], &CompletionOptions::default())
+                .chat(
+                    &context.model_name,
+                    &msgs,
+                    &[],
+                    &CompletionOptions::default(),
+                )
                 .await
             {
                 Ok(response) => {
@@ -878,8 +965,8 @@ impl Phase for VerifyPhase {
 
                     (text, conf)
                 }
-                Err(e) => {
-                    tracing::warn!("[VERIFY] LLM call failed: {}", e);
+                Err(_error) => {
+                    tracing::warn!("Verification model call failed; using heuristic verification");
                     // Fall through to heuristic
                     let verification = match current_task {
                         Some(task) => {

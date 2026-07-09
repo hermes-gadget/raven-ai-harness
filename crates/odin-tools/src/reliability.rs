@@ -1,4 +1,4 @@
-//! Per-tool reliability scoring for the Odin harness.
+//! Per-tool reliability scoring for Raven Agent.
 //!
 //! Tracks success/failure rates per tool, computes a reliability score (0.0–1.0),
 //! and exposes query methods for tool selection guidance.
@@ -144,6 +144,7 @@ impl ReliabilityTracker {
     }
 
     /// Create a tracker with default configuration.
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(ReliabilityConfig::default())
     }
@@ -366,8 +367,10 @@ mod tests {
 
     #[test]
     fn test_window_trimming() {
-        let mut config = ReliabilityConfig::default();
-        config.window_size = 5;
+        let config = ReliabilityConfig {
+            window_size: 5,
+            ..ReliabilityConfig::default()
+        };
         let tracker = ReliabilityTracker::new(config);
 
         // First 5: all failures
@@ -385,8 +388,10 @@ mod tests {
 
     #[test]
     fn test_decay_prefers_recent() {
-        let mut config = ReliabilityConfig::default();
-        config.half_life = Duration::from_millis(10);
+        let config = ReliabilityConfig {
+            half_life: Duration::from_millis(10),
+            ..ReliabilityConfig::default()
+        };
         let tracker = ReliabilityTracker::new(config);
 
         // Failure far in the past
@@ -419,8 +424,10 @@ mod tests {
 
     #[test]
     fn test_unreliable_detection() {
-        let mut config = ReliabilityConfig::default();
-        config.alert_threshold = 0.8;
+        let config = ReliabilityConfig {
+            alert_threshold: 0.8,
+            ..ReliabilityConfig::default()
+        };
         let tracker = ReliabilityTracker::new(config);
 
         for _ in 0..5 {
@@ -475,8 +482,10 @@ mod tests {
 
     #[test]
     fn test_calls_until_mature() {
-        let mut config = ReliabilityConfig::default();
-        config.window_size = 10;
+        let config = ReliabilityConfig {
+            window_size: 10,
+            ..ReliabilityConfig::default()
+        };
         let tracker = ReliabilityTracker::new(config);
 
         tracker.record_success("young", 50);

@@ -1,4 +1,4 @@
-//! odin-scheduler — Cron-like job scheduling for the Odin harness.
+//! `odin-scheduler` — cron-like job scheduling for Raven Agent.
 //!
 //! Provides a [`Scheduler`] that manages a collection of scheduled [`Job`]s,
 //! parses cron-like expressions via [`Schedule`], and dispatches due jobs

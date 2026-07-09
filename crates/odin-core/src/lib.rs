@@ -1,6 +1,6 @@
-//! Odin Core — Foundation types, configuration, errors, and traits.
+//! Raven Agent core — foundation types, configuration, errors, and traits.
 //!
-//! This crate provides the shared vocabulary for all other Odin crates.
+//! This crate provides the shared vocabulary for the internal `odin-*` crates.
 //! It has minimal dependencies and no feature flags — everything here
 //! is always available.
 

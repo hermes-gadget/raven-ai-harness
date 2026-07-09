@@ -1,8 +1,8 @@
-//! Error types for the Odin harness.
+//! Error types for Raven Agent.
 
 use crate::types::{LoopPhase, Severity};
 
-/// The main error type for all Odin operations.
+/// The main error type for Raven Agent operations.
 #[derive(Debug, thiserror::Error)]
 pub enum OdinError {
     #[error("Configuration error: {0}")]

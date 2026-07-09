@@ -1,7 +1,8 @@
 [package]
 name = "odin-orchestrator"
 version.workspace = true
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
 license = "MIT"
 description = "Multi-agent orchestrator: Composer, task graph, file locking, merge resolution"
 

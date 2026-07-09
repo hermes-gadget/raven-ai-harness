@@ -187,6 +187,7 @@ impl SecretRedactor {
 
     // -- pattern construction -----------------------------------------------
 
+    #[allow(clippy::vec_init_then_push)]
     fn build_all_patterns() -> Vec<Pattern> {
         let mut v = Vec::new();
 
@@ -472,7 +473,6 @@ mod tests {
     const FAKE_ANTHROPIC: &str = "sk-ant-test00000000000000000000000000";
     const FAKE_GITHUB: &str = "ghp_test0000000000000000000000000000";
     const FAKE_GITLAB: &str = "glpat-test0000000000000000000000000";
-    const FAKE_SLACK: &str = "X0XB-000000000000-000000000000-000000000000000000000000";
     const FAKE_AWS_KEY: &str = "AKIA0000000000000000";
     const FAKE_AWS_SECRET: &str = "aws_secret_access_key=0000000000000000000000000000000000000000";
     const FAKE_JWT: &str = "eyJ0000000000.eyJ0000000000.0000000000000000000000000000";
