@@ -983,10 +983,10 @@ pub async fn run_ui(app: &mut App) -> anyhow::Result<()> {
         let event = handler.next().await;
         match &event {
             crate::events::Event::Terminal(te) => {
-                if let Some(action) = handler.handle_event(te) {
-                    if let Err(error) = app.handle_action(action).await {
-                        app.on_run_failed("", &error.to_string());
-                    }
+                if let Some(action) = handler.handle_event(te)
+                    && let Err(error) = app.handle_action(action).await
+                {
+                    app.on_run_failed("", &error.to_string());
                 }
             }
             crate::events::Event::Tick => {

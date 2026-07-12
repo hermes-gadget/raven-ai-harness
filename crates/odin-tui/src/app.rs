@@ -1527,10 +1527,9 @@ fn load_display_config() -> Result<odin_core::config::OdinConfig> {
     if let Some(path) = std::env::var_os("RAVEN_CONFIG")
         .or_else(|| std::env::var_os("ODIN_CONFIG"))
         .map(PathBuf::from)
+        && path.exists()
     {
-        if path.exists() {
-            return Ok(odin_core::config::OdinConfig::load(&path)?);
-        }
+        return Ok(odin_core::config::OdinConfig::load(&path)?);
     }
     for candidate in [
         "~/.config/raven/config.yaml",
