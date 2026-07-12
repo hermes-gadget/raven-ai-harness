@@ -77,7 +77,13 @@ echo ""
 
 # Step 10: Tool doctor (comprehensive health check)
 echo "--- Step 10: Tool doctor ---"
-cargo run -- tools doctor 2>&1 | grep -q "Passed" && echo "  ✓ Doctor: all checks passed" || {
+if ! doctor_output=$(cargo run -- tools doctor 2>&1); then
+    printf '%s\n' "$doctor_output" >&2
+    echo "  ✗ FAILED: tool doctor command failed"
+    exit 1
+fi
+grep -q "Passed" <<<"$doctor_output" && echo "  ✓ Doctor: all checks passed" || {
+    printf '%s\n' "$doctor_output" >&2
     echo "  ✗ FAILED: tool doctor found issues"
     exit 1
 }
@@ -116,7 +122,13 @@ else
 fi
 
 # Verify every tool has a description via doctor
-cargo run -- tools validate 2>&1 | grep -q "All tools valid" && echo "  ✓ All tools pass basic validation" || {
+if ! validate_output=$(cargo run -- tools validate 2>&1); then
+    printf '%s\n' "$validate_output" >&2
+    echo "  ✗ FAILED: tool validation command failed"
+    exit 1
+fi
+grep -q "All tools valid" <<<"$validate_output" && echo "  ✓ All tools pass basic validation" || {
+    printf '%s\n' "$validate_output" >&2
     echo "  ✗ FAILED: tool validation found issues"
     exit 1
 }
@@ -130,7 +142,12 @@ echo "--- Step 13: Permission policy enforcement ---"
 # Count tools flagged as dangerous
 DANGEROUS_COUNT=$(cargo run -- tools list 2>&1 | grep -c '⚠' || echo 0)
 # Every dangerous tool must have requires_approval=true (verified in Step 7)
-if cargo test -p odin-tools validator 2>&1 | grep -q "0 failed"; then
+if ! validator_output=$(cargo test -p odin-tools validator 2>&1); then
+    printf '%s\n' "$validator_output" >&2
+    echo "  ✗ FAILED: validator test command failed"
+    exit 1
+fi
+if grep -q "0 failed" <<<"$validator_output"; then
     echo "  ✓ Validator checks pass (permission policies enforced)"
 else
     echo "  ✗ FAILED: validator checks failed"
@@ -140,7 +157,12 @@ echo ""
 
 # Step 14: Skill-tool wiring validation
 echo "--- Step 14: Skill-tool wiring ---"
-if cargo test -p odin-skills 2>&1 | grep -q "0 failed"; then
+if ! skills_output=$(cargo test -p odin-skills 2>&1); then
+    printf '%s\n' "$skills_output" >&2
+    echo "  ✗ FAILED: skills test command failed"
+    exit 1
+fi
+if grep -q "0 failed" <<<"$skills_output"; then
     echo "  ✓ Skills tests pass (required_tools + recommended_tools)"
 else
     echo "  ✗ FAILED: skills tests failed"
@@ -157,7 +179,12 @@ echo ""
 
 # Step 16: Audit redaction integration
 echo "--- Step 16: Audit redaction integration ---"
-if cargo test -p odin-audit 2>&1 | grep -q "0 failed"; then
+if ! audit_output=$(cargo test -p odin-audit 2>&1); then
+    printf '%s\n' "$audit_output" >&2
+    echo "  ✗ FAILED: audit test command failed"
+    exit 1
+fi
+if grep -q "0 failed" <<<"$audit_output"; then
     echo "  ✓ Audit tests pass (mask_secrets flag active, redaction wired in)"
 else
     echo "  ✗ FAILED: audit tests failed"

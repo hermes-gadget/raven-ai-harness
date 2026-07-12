@@ -766,7 +766,6 @@ async fn orchestrate_handler(
     let tasks: Vec<OrchestrateTaskInfo> = graph
         .nodes
         .values()
-        
         .map(|node| {
             // Find which workstream group this node belongs to
             let ws_group = groups

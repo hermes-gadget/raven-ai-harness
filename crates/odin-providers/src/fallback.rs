@@ -803,6 +803,7 @@ mod tests {
         let state = cb.lock().await;
         assert_eq!(state.failure_count, 2);
         assert!(state.circuit_open);
+        drop(state);
 
         // Check that primary was actually skipped
         assert_eq!(primary2.call_count(), 2); // only 2 attempts, 3rd call skipped primary

@@ -449,10 +449,6 @@ async fn cmd_run(
             provider,
             policy_engine,
             tool_registry,
-            sandbox,
-            &config,
-            memory,
-            audit_logger,
         )
         .await;
     }
@@ -605,10 +601,6 @@ async fn run_orchestrated(
     provider: Arc<dyn odin_core::traits::Provider>,
     policy_engine: Arc<odin_permissions::PolicyEngine>,
     tool_registry: Arc<odin_tools::ToolRegistry>,
-    _sandbox: Arc<odin_tools::Sandbox>,
-    _config: &OdinConfig,
-    _memory: Arc<odin_memory::SqliteMemoryStore>,
-    _audit_logger: Arc<odin_audit::AuditLoggerImpl>,
 ) -> anyhow::Result<()> {
     use odin_orchestrator::composer::ComposerConfig;
     use odin_orchestrator::merge::{MergeStrategy, SubAgentResult};
@@ -644,10 +636,8 @@ async fn run_orchestrated(
     let groups = composer.detect_workstreams(graph);
 
     // Extract all node data before mutating composer
-    let mut node_tasks: Vec<(
-        usize,
-        Vec<(uuid::Uuid, String, String, Vec<String>, Vec<String>, u32)>,
-    )> = Vec::new();
+    type NodeExecutionSpec = (uuid::Uuid, String, String, Vec<String>, Vec<String>, u32);
+    let mut node_tasks: Vec<(usize, Vec<NodeExecutionSpec>)> = Vec::new();
     for (group_idx, group) in groups.iter().enumerate() {
         let mut tasks = Vec::new();
         for &node_id in group {
@@ -962,19 +952,20 @@ async fn cmd_orchestrate(action: OrchestrateAction) -> anyhow::Result<()> {
 
             // Try to load as an agent lifecycle
             if let Ok(run_id) = uuid::Uuid::parse_str(&id)
-                && let Ok(lc) = store.load_agent_lifecycle(run_id).await {
-                    println!("🔍 Agent Lifecycle: {}", lc.agent_id);
-                    println!("   Phase: {:?}", lc.phase);
-                    println!("   Created: {}", lc.created_at);
-                    if let Some(finished) = lc.finished_at {
-                        println!("   Finished: {}", finished);
-                    }
-                    if let Some(err) = &lc.error {
-                        println!("   Error: {}", err);
-                    }
-                    println!("   History: {} transition(s)", lc.history.len());
-                    return Ok(());
+                && let Ok(lc) = store.load_agent_lifecycle(run_id).await
+            {
+                println!("🔍 Agent Lifecycle: {}", lc.agent_id);
+                println!("   Phase: {:?}", lc.phase);
+                println!("   Created: {}", lc.created_at);
+                if let Some(finished) = lc.finished_at {
+                    println!("   Finished: {}", finished);
                 }
+                if let Some(err) = &lc.error {
+                    println!("   Error: {}", err);
+                }
+                println!("   History: {} transition(s)", lc.history.len());
+                return Ok(());
+            }
 
             println!(
                 "🔍 Not found: '{}' — no task graph or agent lifecycle with that ID.",
@@ -1684,20 +1675,21 @@ async fn cmd_tasks(action: TasksAction) -> anyhow::Result<()> {
 
             for line in contents.lines() {
                 if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line)
-                    && entry.id == target_id {
-                        println!("Task: {}", entry.id);
-                        println!("  Event:    {}", entry.event_type);
-                        println!("  Action:   {}", entry.action);
-                        println!("  Agent:    {}", entry.agent_id);
-                        println!("  Session:  {}", entry.session_id);
-                        println!("  Time:     {}", entry.timestamp.to_rfc3339());
-                        println!("  Result:   {:?}", entry.result);
-                        println!(
-                            "  Details:  {}",
-                            serde_json::to_string_pretty(&entry.details)?
-                        );
-                        return Ok(());
-                    }
+                    && entry.id == target_id
+                {
+                    println!("Task: {}", entry.id);
+                    println!("  Event:    {}", entry.event_type);
+                    println!("  Action:   {}", entry.action);
+                    println!("  Agent:    {}", entry.agent_id);
+                    println!("  Session:  {}", entry.session_id);
+                    println!("  Time:     {}", entry.timestamp.to_rfc3339());
+                    println!("  Result:   {:?}", entry.result);
+                    println!(
+                        "  Details:  {}",
+                        serde_json::to_string_pretty(&entry.details)?
+                    );
+                    return Ok(());
+                }
             }
 
             println!("Task '{id}' not found in audit log.");
@@ -1782,9 +1774,10 @@ async fn cmd_sessions(action: SessionsAction) -> anyhow::Result<()> {
             let mut entries = Vec::new();
             for line in contents.lines() {
                 if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line)
-                    && entry.session_id == session_id {
-                        entries.push(entry);
-                    }
+                    && entry.session_id == session_id
+                {
+                    entries.push(entry);
+                }
             }
 
             if entries.is_empty() {
@@ -2183,9 +2176,10 @@ async fn cmd_audit(action: AuditAction) -> anyhow::Result<()> {
             let mut entries = Vec::new();
             for line in contents.lines() {
                 if let Ok(entry) = serde_json::from_str::<odin_core::types::AuditEntry>(line)
-                    && (entry.id == target_id || entry.session_id == target_id) {
-                        entries.push(entry);
-                    }
+                    && (entry.id == target_id || entry.session_id == target_id)
+                {
+                    entries.push(entry);
+                }
             }
 
             if entries.is_empty() {

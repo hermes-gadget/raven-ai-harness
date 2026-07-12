@@ -188,155 +188,135 @@ impl SecretRedactor {
     // -- pattern construction -----------------------------------------------
 
     fn build_all_patterns() -> Vec<Pattern> {
-        let mut v = Vec::new();
-
-        // ── Secrets: API Keys & Tokens ──────────────────────────────────
-        v.push(compile(
-            r"sk-[a-zA-Z0-9]{20,}",
-            "OpenAI API key",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"sk-ant-[a-zA-Z0-9_-]{20,}",
-            "Anthropic API key",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"gh[pousr]_[a-zA-Z0-9]{20,}",
-            "GitHub token",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"glpat-[a-zA-Z0-9_-]{20,}",
-            "GitLab personal access token",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"xox[bprs]-\d{11,}-\d{11,}-[a-zA-Z0-9]{24,}",
-            "Slack token",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"AKIA[0-9A-Z]{16}",
-            "AWS access key",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"(?i)aws_secret_access_key[=:]\s*[a-zA-Z0-9/+=]{20,}",
-            "AWS secret key",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"(?i)(api[_-]?key|apikey|api[_-]?secret)[=:]\s*[a-zA-Z0-9_-]{16,}",
-            "Generic API key assignment",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"(?i)(token|secret|password|passwd)[=:]\s*\S{8,}",
-            "Credential assignment",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"(?i)(Authorization|auth)[=:]\s*[Bb]earer\s+[a-zA-Z0-9._\-+/=]{20,}",
-            "Authorization header",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}",
-            "JWT token",
-            PatternCategory::Secret,
-        ));
-
-        // ── Secrets: Private Keys ───────────────────────────────────────
-        v.push(compile(
-            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
-            "Private key header",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"-----BEGIN PGP PRIVATE KEY BLOCK-----",
-            "PGP private key",
-            PatternCategory::Secret,
-        ));
-
-        // ── Secrets: Connection Strings ──────────────────────────────────
-        v.push(compile(
-            r"(?i)(?:mongodb|mysql|postgres(?:ql)?|redis|sqlite)://[^@\s]+:[^@\s]+@[^\s]+",
-            "Database connection string",
-            PatternCategory::Secret,
-        ));
-        v.push(compile(
-            r"(?i)connection[_-]?string[=:]\s*\S{10,}",
-            "Connection string assignment",
-            PatternCategory::Secret,
-        ));
-
-        // ── Secrets: Stripe / Payment ────────────────────────────────────
-        v.push(compile(
-            r"(?:sk|pk)_(?:live|test)_[a-zA-Z0-9]{24,}",
-            "Stripe key",
-            PatternCategory::Secret,
-        ));
-
-        // ── Secrets: Bearer tokens (standalone) ──────────────────────────
-        v.push(compile(
-            r"(?i)bearer\s+([a-zA-Z0-9._\-+/=]{20,})",
-            "Bearer token",
-            PatternCategory::Secret,
-        ));
-
-        // ── PII: Email addresses ────────────────────────────────────────
-        v.push(compile(
-            r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
-            "Email address",
-            PatternCategory::Pii,
-        ));
-
-        // ── PII: Phone numbers (US + international variants) ────────────
-        // Require at least one separator (dash, dot, space, or parens) to avoid
-        // false positives on SHA hashes, serial numbers, etc.
-        v.push(compile(
-            r"(?:\+?\d{1,3}[-.\s])?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}",
-            "Phone number",
-            PatternCategory::Pii,
-        ));
-
-        // ── PII: SSN (US) ───────────────────────────────────────────────
-        v.push(compile(
-            r"\b\d{3}-\d{2}-\d{4}\b",
-            "SSN",
-            PatternCategory::Pii,
-        ));
-
-        // ── PII: Credit card numbers ────────────────────────────────────
-        v.push(compile(
-            r"\b(?:\d[ -]*?){13,16}\b",
-            "Credit card number",
-            PatternCategory::Pii,
-        ));
-
-        // ── PII: IPv4 & IPv6 addresses ──────────────────────────────────
-        v.push(compile(
-            r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
-            "IPv4 address",
-            PatternCategory::Pii,
-        ));
-        v.push(compile(
-            r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b",
-            "IPv6 address",
-            PatternCategory::Pii,
-        ));
-
-        // ── PII: Long numeric sequences (potential account numbers) ─────
-        // 16+ digits to avoid false positives on order #s, serial #s, etc.
-        // and to not overlap with credit card detection (13-16 digits).
-        v.push(compile(
-            r"\b\d{16,}\b",
-            "Numeric identifier",
-            PatternCategory::Pii,
-        ));
-
-        v
+        vec![
+            // ── Secrets: API Keys & Tokens ──────────────────────────────────
+            compile(
+                r"sk-[a-zA-Z0-9]{20,}",
+                "OpenAI API key",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"sk-ant-[a-zA-Z0-9_-]{20,}",
+                "Anthropic API key",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"gh[pousr]_[a-zA-Z0-9]{20,}",
+                "GitHub token",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"glpat-[a-zA-Z0-9_-]{20,}",
+                "GitLab personal access token",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"xox[bprs]-\d{11,}-\d{11,}-[a-zA-Z0-9]{24,}",
+                "Slack token",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"AKIA[0-9A-Z]{16}",
+                "AWS access key",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"(?i)aws_secret_access_key[=:]\s*[a-zA-Z0-9/+=]{20,}",
+                "AWS secret key",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"(?i)(api[_-]?key|apikey|api[_-]?secret)[=:]\s*[a-zA-Z0-9_-]{16,}",
+                "Generic API key assignment",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"(?i)(token|secret|password|passwd)[=:]\s*\S{8,}",
+                "Credential assignment",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"(?i)(Authorization|auth)[=:]\s*[Bb]earer\s+[a-zA-Z0-9._\-+/=]{20,}",
+                "Authorization header",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}",
+                "JWT token",
+                PatternCategory::Secret,
+            ),
+            // ── Secrets: Private Keys ───────────────────────────────────────
+            compile(
+                r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+                "Private key header",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"-----BEGIN PGP PRIVATE KEY BLOCK-----",
+                "PGP private key",
+                PatternCategory::Secret,
+            ),
+            // ── Secrets: Connection Strings ──────────────────────────────────
+            compile(
+                r"(?i)(?:mongodb|mysql|postgres(?:ql)?|redis|sqlite)://[^@\s]+:[^@\s]+@[^\s]+",
+                "Database connection string",
+                PatternCategory::Secret,
+            ),
+            compile(
+                r"(?i)connection[_-]?string[=:]\s*\S{10,}",
+                "Connection string assignment",
+                PatternCategory::Secret,
+            ),
+            // ── Secrets: Stripe / Payment ────────────────────────────────────
+            compile(
+                r"(?:sk|pk)_(?:live|test)_[a-zA-Z0-9]{24,}",
+                "Stripe key",
+                PatternCategory::Secret,
+            ),
+            // ── Secrets: Bearer tokens (standalone) ──────────────────────────
+            compile(
+                r"(?i)bearer\s+([a-zA-Z0-9._\-+/=]{20,})",
+                "Bearer token",
+                PatternCategory::Secret,
+            ),
+            // ── PII: Email addresses ────────────────────────────────────────
+            compile(
+                r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}",
+                "Email address",
+                PatternCategory::Pii,
+            ),
+            // ── PII: Phone numbers (US + international variants) ────────────
+            // Require at least one separator (dash, dot, space, or parens) to avoid
+            // false positives on SHA hashes, serial numbers, etc.
+            compile(
+                r"(?:\+?\d{1,3}[-.\s])?\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}",
+                "Phone number",
+                PatternCategory::Pii,
+            ),
+            // ── PII: SSN (US) ───────────────────────────────────────────────
+            compile(r"\b\d{3}-\d{2}-\d{4}\b", "SSN", PatternCategory::Pii),
+            // ── PII: Credit card numbers ────────────────────────────────────
+            compile(
+                r"\b(?:\d[ -]*?){13,16}\b",
+                "Credit card number",
+                PatternCategory::Pii,
+            ),
+            // ── PII: IPv4 & IPv6 addresses ──────────────────────────────────
+            compile(
+                r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+                "IPv4 address",
+                PatternCategory::Pii,
+            ),
+            compile(
+                r"\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b",
+                "IPv6 address",
+                PatternCategory::Pii,
+            ),
+            // ── PII: Long numeric sequences (potential account numbers) ─────
+            // 16+ digits to avoid false positives on order #s, serial #s, etc.
+            // and to not overlap with credit card detection (13-16 digits).
+            compile(r"\b\d{16,}\b", "Numeric identifier", PatternCategory::Pii),
+        ]
     }
 
     // -- public API --------------------------------------------------------
@@ -472,7 +452,7 @@ mod tests {
     const FAKE_ANTHROPIC: &str = "sk-ant-test00000000000000000000000000";
     const FAKE_GITHUB: &str = "ghp_test0000000000000000000000000000";
     const FAKE_GITLAB: &str = "glpat-test0000000000000000000000000";
-    const FAKE_SLACK: &str = "X0XB-000000000000-000000000000-000000000000000000000000";
+
     const FAKE_AWS_KEY: &str = "AKIA0000000000000000";
     const FAKE_AWS_SECRET: &str = "aws_secret_access_key=0000000000000000000000000000000000000000";
     const FAKE_JWT: &str = "eyJ0000000000.eyJ0000000000.0000000000000000000000000000";

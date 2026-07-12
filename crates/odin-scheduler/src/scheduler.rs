@@ -432,10 +432,9 @@ impl Scheduler {
                         drop(jobs_guard);
                     }
 
-                    if task_goal.is_some() && runtime.is_some() {
+                    if let (Some(goal), Some(runtime)) = (task_goal, runtime.as_ref()) {
                         // Runtime-driven execution path in the loop
-                        let runtime = runtime.clone().unwrap();
-                        let goal = task_goal.unwrap();
+                        let runtime = runtime.clone();
                         let max_iters = 100; // default
                         let jobs_clone = jobs.clone();
                         let _store = store.clone();
@@ -727,11 +726,10 @@ mod tests {
             let store = Arc::new(SqliteSchedulerStore::new(&path_str).unwrap());
             let sched = Scheduler::default().with_store(store.clone());
             let task: JobTask = Arc::new(|| Box::pin(async {}));
-            let id = sched
+            sched
                 .add_job("restart-test", "*/5 * * * *", task)
                 .await
-                .unwrap();
-            id
+                .unwrap()
         };
 
         // Second scheduler (simulating restart): verify job is loaded

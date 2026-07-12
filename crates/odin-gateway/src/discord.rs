@@ -114,13 +114,11 @@ impl EventHandler for DiscordEventHandler {
         }
 
         // Extract the subcommand from options
-        let sub_option = command.data.options.first().and_then(|opt| {
-            if matches!(opt.kind(), CommandOptionType::SubCommand) {
-                Some(opt)
-            } else {
-                None
-            }
-        });
+        let sub_option = command
+            .data
+            .options
+            .first()
+            .filter(|opt| matches!(opt.kind(), CommandOptionType::SubCommand));
 
         let subcommand: String = match sub_option {
             Some(opt) => opt.name.clone(),
