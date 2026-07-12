@@ -96,7 +96,7 @@ Scope: full repo (runtime, orchestrator, TUI, CLI, providers, tools, MCP, schedu
 - **Status:** [x] already documented in README/CLI help; left as-is
 
 ### C4. CI uses `dtolnay/rust-toolchain@stable` matching `rust-toolchain.toml`
-- **Status:** [x] OK (edition 2024 / 1.85+ on stable)
+- **Status:** [x] OK (edition 2024 / 1.88+ on stable)
 
 ### C5. Binary `odin` keeps non-interactive bare invocation
 - **Status:** [x] intentional compatibility

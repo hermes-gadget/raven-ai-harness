@@ -16,8 +16,8 @@ odin-tools.workspace = true
 odin-permissions = { path = "../odin-permissions" }
 odin-audit.workspace = true
 odin-skills.workspace = true
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+crossterm = "0.29"
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true

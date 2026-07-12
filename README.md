@@ -11,7 +11,7 @@ The GitHub repository still has the historical **raven-ai-harness** slug; this i
 
 Prerequisites:
 
-- Rust 1.85 or newer (the workspace uses Rust edition 2024)
+- Rust 1.88 or newer (the workspace uses Rust edition 2024)
 - A model provider configured through YAML
 - Provider credentials supplied through environment variables, not committed config values
 

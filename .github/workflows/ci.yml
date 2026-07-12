@@ -33,7 +33,7 @@ jobs:
     name: Small-model mocked eval
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p odin-cli --bin raven -- eval mocked --format json
@@ -63,7 +63,7 @@ jobs:
     name: Tool validation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/validate-tools.sh

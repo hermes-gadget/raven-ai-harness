@@ -327,12 +327,12 @@ pub fn distill_context(state: &LoopState) -> DistilledContext {
     }
 
     for result in &state.tool_results {
-        if !result.success {
-            if let Some(error) = &result.error {
-                distilled
-                    .errors
-                    .push(format!("{}: {}", result.tool_name, error));
-            }
+        if !result.success
+            && let Some(error) = &result.error
+        {
+            distilled
+                .errors
+                .push(format!("{}: {}", result.tool_name, error));
         }
 
         if matches!(
@@ -631,10 +631,10 @@ pub fn repair_tool_arguments_once(
         if candidate.is_empty() {
             continue;
         }
-        if let Ok(value) = serde_json::from_str::<Value>(&candidate) {
-            if let Some(repair) = repair_tool_argument_value(tool_name, value, schema) {
-                return Some(repair);
-            }
+        if let Ok(value) = serde_json::from_str::<Value>(&candidate)
+            && let Some(repair) = repair_tool_argument_value(tool_name, value, schema)
+        {
+            return Some(repair);
         }
     }
 
@@ -725,10 +725,11 @@ fn apply_aliases(tool_name: &str, object: &mut Map<String, Value>) {
         }
     }
 
-    if tool_name == "file_write" && !object.contains_key("content") {
-        if let Some(value) = object.get("data").cloned() {
-            object.insert("content".into(), value);
-        }
+    if tool_name == "file_write"
+        && !object.contains_key("content")
+        && let Some(value) = object.get("data").cloned()
+    {
+        object.insert("content".into(), value);
     }
 }
 
