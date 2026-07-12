@@ -77,7 +77,8 @@ echo ""
 
 # Step 10: Tool doctor (comprehensive health check)
 echo "--- Step 10: Tool doctor ---"
-cargo run -- tools doctor 2>&1 | grep -q "Passed" && echo "  ✓ Doctor: all checks passed" || {
+doctor_output=$(cargo run -- tools doctor 2>&1)
+grep -q "Passed" <<<"$doctor_output" && echo "  ✓ Doctor: all checks passed" || {
     echo "  ✗ FAILED: tool doctor found issues"
     exit 1
 }
@@ -116,7 +117,8 @@ else
 fi
 
 # Verify every tool has a description via doctor
-cargo run -- tools validate 2>&1 | grep -q "All tools valid" && echo "  ✓ All tools pass basic validation" || {
+validate_output=$(cargo run -- tools validate 2>&1)
+grep -q "All tools valid" <<<"$validate_output" && echo "  ✓ All tools pass basic validation" || {
     echo "  ✗ FAILED: tool validation found issues"
     exit 1
 }
@@ -130,7 +132,8 @@ echo "--- Step 13: Permission policy enforcement ---"
 # Count tools flagged as dangerous
 DANGEROUS_COUNT=$(cargo run -- tools list 2>&1 | grep -c '⚠' || echo 0)
 # Every dangerous tool must have requires_approval=true (verified in Step 7)
-if cargo test -p odin-tools validator 2>&1 | grep -q "0 failed"; then
+validator_output=$(cargo test -p odin-tools validator 2>&1)
+if grep -q "0 failed" <<<"$validator_output"; then
     echo "  ✓ Validator checks pass (permission policies enforced)"
 else
     echo "  ✗ FAILED: validator checks failed"
@@ -140,7 +143,8 @@ echo ""
 
 # Step 14: Skill-tool wiring validation
 echo "--- Step 14: Skill-tool wiring ---"
-if cargo test -p odin-skills 2>&1 | grep -q "0 failed"; then
+skills_output=$(cargo test -p odin-skills 2>&1)
+if grep -q "0 failed" <<<"$skills_output"; then
     echo "  ✓ Skills tests pass (required_tools + recommended_tools)"
 else
     echo "  ✗ FAILED: skills tests failed"
@@ -157,7 +161,8 @@ echo ""
 
 # Step 16: Audit redaction integration
 echo "--- Step 16: Audit redaction integration ---"
-if cargo test -p odin-audit 2>&1 | grep -q "0 failed"; then
+audit_output=$(cargo test -p odin-audit 2>&1)
+if grep -q "0 failed" <<<"$audit_output"; then
     echo "  ✓ Audit tests pass (mask_secrets flag active, redaction wired in)"
 else
     echo "  ✗ FAILED: audit tests failed"
