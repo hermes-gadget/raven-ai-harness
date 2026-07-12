@@ -96,10 +96,11 @@ impl Phase for PlanPhase {
                 // Append to the first system message
                 if let Some(first) = state.messages.first_mut()
                     && first.role == Role::System
-                    && let MessageContent::Text { content } = &mut first.content {
-                        content.push_str("\n\n");
-                        content.push_str(&skills_prompt);
-                    }
+                    && let MessageContent::Text { content } = &mut first.content
+                {
+                    content.push_str("\n\n");
+                    content.push_str(&skills_prompt);
+                }
             }
         }
 

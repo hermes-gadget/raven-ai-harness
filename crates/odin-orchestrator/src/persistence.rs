@@ -6,7 +6,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx_core::query::query;
+use sqlx_core::query_as::query_as;
+use sqlx_sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -17,7 +19,7 @@ use crate::task_graph::TaskGraph;
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[from] sqlx_core::Error),
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("Not found: {0}")]
@@ -98,7 +100,7 @@ impl SqliteOrchestrationStore {
 #[async_trait]
 impl OrchestrationStore for SqliteOrchestrationStore {
     async fn initialize(&self) -> Result<(), StoreError> {
-        sqlx::query(
+        query(
             r#"
             CREATE TABLE IF NOT EXISTS task_graphs (
                 root_id TEXT PRIMARY KEY,
@@ -114,7 +116,7 @@ impl OrchestrationStore for SqliteOrchestrationStore {
         .execute(&self.pool)
         .await?;
 
-        sqlx::query(
+        query(
             r#"
             CREATE TABLE IF NOT EXISTS agent_lifecycles (
                 agent_id TEXT PRIMARY KEY,
@@ -140,7 +142,7 @@ impl OrchestrationStore for SqliteOrchestrationStore {
         let status = serde_json::to_string(&graph.status)?;
         let node_count = graph.nodes.len() as i64;
 
-        sqlx::query(
+        query(
             r#"
             INSERT INTO task_graphs (root_id, root_goal, graph_json, status, node_count, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -165,21 +167,18 @@ impl OrchestrationStore for SqliteOrchestrationStore {
     }
 
     async fn load_task_graph(&self, root_id: &str) -> Result<TaskGraph, StoreError> {
-        let row =
-            sqlx::query_as::<_, (String,)>("SELECT graph_json FROM task_graphs WHERE root_id = ?")
-                .bind(root_id)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or_else(|| {
-                    StoreError::NotFound(format!("Task graph '{}' not found", root_id))
-                })?;
+        let row = query_as::<_, (String,)>("SELECT graph_json FROM task_graphs WHERE root_id = ?")
+            .bind(root_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("Task graph '{}' not found", root_id)))?;
 
         let graph: TaskGraph = serde_json::from_str(&row.0)?;
         Ok(graph)
     }
 
     async fn list_task_graphs(&self) -> Result<Vec<TaskGraphSummary>, StoreError> {
-        let rows = sqlx::query_as::<_, (String, String, i64, String, String)>(
+        let rows = query_as::<_, (String, String, i64, String, String)>(
             "SELECT root_goal, status, node_count, created_at, updated_at FROM task_graphs ORDER BY updated_at DESC",
         )
         .fetch_all(&self.pool)
@@ -208,7 +207,7 @@ impl OrchestrationStore for SqliteOrchestrationStore {
         let now = Utc::now().to_rfc3339();
         let finished = lifecycle.finished_at.map(|t| t.to_rfc3339());
 
-        sqlx::query(
+        query(
             r#"
             INSERT INTO agent_lifecycles (agent_id, phase, lifecycle_json, created_at, finished_at)
             VALUES (?, ?, ?, ?, ?)
@@ -230,7 +229,7 @@ impl OrchestrationStore for SqliteOrchestrationStore {
     }
 
     async fn load_agent_lifecycle(&self, agent_id: Uuid) -> Result<AgentLifecycle, StoreError> {
-        let row = sqlx::query_as::<_, (String,)>(
+        let row = query_as::<_, (String,)>(
             "SELECT lifecycle_json FROM agent_lifecycles WHERE agent_id = ?",
         )
         .bind(agent_id.to_string())
@@ -243,7 +242,7 @@ impl OrchestrationStore for SqliteOrchestrationStore {
     }
 
     async fn list_agent_lifecycles(&self) -> Result<Vec<AgentLifecycleSummary>, StoreError> {
-        let rows = sqlx::query_as::<_, (String, String, String, Option<String>)>(
+        let rows = query_as::<_, (String, String, String, Option<String>)>(
             "SELECT agent_id, phase, created_at, finished_at FROM agent_lifecycles ORDER BY created_at DESC",
         )
         .fetch_all(&self.pool)

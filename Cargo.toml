@@ -39,7 +39,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 directories = "6"
-sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+sqlx-core = { version = "=0.8.6", features = ["_rt-tokio"] }
+sqlx-sqlite = { version = "=0.8.6", features = ["bundled", "chrono", "uuid"] }
 strum = { version = "0.27", features = ["derive"] }
 strum_macros = "0.27"
 dashmap = "6"
@@ -66,7 +67,8 @@ percent-encoding = "2"
 bytes = "1"
 pin-project-lite = "0.2"
 arc-swap = "1"
-serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model"] }
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "native_tls_backend", "model"] }
+openssl = { version = "0.10", features = ["vendored"] }
 
 # Odin internal crates
 odin-core = { path = "crates/odin-core" }

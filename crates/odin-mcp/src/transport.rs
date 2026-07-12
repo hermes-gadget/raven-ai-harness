@@ -177,10 +177,11 @@ impl Drop for StdioTransport {
     fn drop(&mut self) {
         // Best-effort cleanup in synchronous context
         if let Ok(mut child_guard) = self.child.try_lock()
-            && let Some(mut child) = child_guard.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
+            && let Some(mut child) = child_guard.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 

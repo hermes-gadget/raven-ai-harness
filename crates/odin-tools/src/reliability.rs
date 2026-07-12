@@ -134,6 +134,12 @@ pub struct ReliabilityTracker {
     records: RwLock<HashMap<String, Vec<CallRecord>>>,
 }
 
+impl Default for ReliabilityTracker {
+    fn default() -> Self {
+        Self::new(ReliabilityConfig::default())
+    }
+}
+
 impl ReliabilityTracker {
     /// Create a new tracker with the given configuration.
     pub fn new(config: ReliabilityConfig) -> Self {
@@ -141,11 +147,6 @@ impl ReliabilityTracker {
             config,
             records: RwLock::new(HashMap::new()),
         }
-    }
-
-    /// Create a tracker with default configuration.
-    pub fn default() -> Self {
-        Self::new(ReliabilityConfig::default())
     }
 
     /// Record a successful tool call.
@@ -310,12 +311,6 @@ impl ReliabilityTracker {
     }
 }
 
-impl Default for ReliabilityTracker {
-    fn default() -> Self {
-        Self::default()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -366,8 +361,10 @@ mod tests {
 
     #[test]
     fn test_window_trimming() {
-        let mut config = ReliabilityConfig::default();
-        config.window_size = 5;
+        let config = ReliabilityConfig {
+            window_size: 5,
+            ..ReliabilityConfig::default()
+        };
         let tracker = ReliabilityTracker::new(config);
 
         // First 5: all failures
@@ -385,8 +382,10 @@ mod tests {
 
     #[test]
     fn test_decay_prefers_recent() {
-        let mut config = ReliabilityConfig::default();
-        config.half_life = Duration::from_millis(10);
+        let config = ReliabilityConfig {
+            half_life: Duration::from_millis(10),
+            ..ReliabilityConfig::default()
+        };
         let tracker = ReliabilityTracker::new(config);
 
         // Failure far in the past
@@ -419,8 +418,10 @@ mod tests {
 
     #[test]
     fn test_unreliable_detection() {
-        let mut config = ReliabilityConfig::default();
-        config.alert_threshold = 0.8;
+        let config = ReliabilityConfig {
+            alert_threshold: 0.8,
+            ..ReliabilityConfig::default()
+        };
         let tracker = ReliabilityTracker::new(config);
 
         for _ in 0..5 {
@@ -475,8 +476,10 @@ mod tests {
 
     #[test]
     fn test_calls_until_mature() {
-        let mut config = ReliabilityConfig::default();
-        config.window_size = 10;
+        let config = ReliabilityConfig {
+            window_size: 10,
+            ..ReliabilityConfig::default()
+        };
         let tracker = ReliabilityTracker::new(config);
 
         tracker.record_success("young", 50);

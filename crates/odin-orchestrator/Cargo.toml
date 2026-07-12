@@ -18,7 +18,8 @@ uuid = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 futures = { workspace = true }
-sqlx = { workspace = true }
+sqlx-core = { workspace = true }
+sqlx-sqlite = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -108,12 +108,13 @@ pub trait Tool: Send + Sync {
         if let Some(required) = params.get("required").and_then(|v| v.as_array()) {
             for field in required {
                 if let Some(field_name) = field.as_str()
-                    && args.get(field_name).is_none() {
-                        return Err(crate::error::OdinError::Validation(format!(
-                            "Missing required field '{}' for tool '{}'",
-                            field_name, schema.function.name
-                        )));
-                    }
+                    && args.get(field_name).is_none()
+                {
+                    return Err(crate::error::OdinError::Validation(format!(
+                        "Missing required field '{}' for tool '{}'",
+                        field_name, schema.function.name
+                    )));
+                }
             }
         }
 
