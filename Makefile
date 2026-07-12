@@ -9,13 +9,16 @@ check:
 	cargo check --workspace --all-targets
 
 test:
-	cargo test --workspace
+	cargo test --workspace --all-targets
 
 test-verbose:
 	cargo test --workspace -- --nocapture
 
 bench:
-	cargo bench
+	cargo bench --no-run
+
+validate-tools:
+	./scripts/validate-tools.sh
 
 lint:
 	cargo fmt --all -- --check

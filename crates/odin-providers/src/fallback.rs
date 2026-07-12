@@ -66,16 +66,6 @@ impl CircuitBreakerState {
         let elapsed = Utc::now().timestamp() - self.last_failure_time;
         elapsed < self.cooldown_secs as i64
     }
-
-    /// Check if the circuit should be half-open (cooldown expired, ready to retry).
-    #[allow(dead_code)]
-    fn should_retry(&self) -> bool {
-        if !self.circuit_open || self.threshold == 0 {
-            return false;
-        }
-        let elapsed = Utc::now().timestamp() - self.last_failure_time;
-        elapsed >= self.cooldown_secs as i64
-    }
 }
 
 /// Health status of a provider in the chain.
@@ -120,9 +110,6 @@ struct FallbackInner {
     health_check_started: AtomicBool,
     /// Health check interval in seconds
     health_check_interval: u64,
-    /// Default circuit breaker threshold
-    #[allow(dead_code)]
-    circuit_breaker_threshold: u32,
 }
 
 /// A provider that chains a primary with fallbacks, featuring circuit breaker and health checks.
@@ -192,7 +179,6 @@ impl FallbackProvider {
             health_status,
             health_check_started: AtomicBool::new(false),
             health_check_interval: health_check_interval_secs,
-            circuit_breaker_threshold,
         });
 
         Self { inner }

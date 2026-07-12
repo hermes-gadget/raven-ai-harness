@@ -121,9 +121,6 @@ pub struct FileDelete;
 #[derive(Deserialize)]
 struct FileDeleteArgs {
     path: String,
-    #[serde(default)]
-    #[allow(dead_code)]
-    force: bool,
 }
 
 #[async_trait]
@@ -144,8 +141,7 @@ impl Tool for FileDelete {
                     "type": "object",
                     "required": ["path"],
                     "properties": {
-                        "path": {"type": "string", "description": "Path to the file or directory to delete"},
-                        "force": {"type": "boolean", "description": "Force deletion (default: false)"}
+                        "path": {"type": "string", "description": "Path to the file or empty directory to delete"}
                     }
                 }),
             },

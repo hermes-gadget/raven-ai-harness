@@ -297,7 +297,9 @@ impl Provider for MockProvider {
         _tools: &[ToolSchema],
         _options: &CompletionOptions,
     ) -> OdinResult<Box<dyn ChatStream>> {
-        unimplemented!()
+        Err(odin_core::error::OdinError::Other(
+            "comparison provider does not stream".into(),
+        ))
     }
 
     async fn health_check(&self) -> OdinResult<bool> {

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/odin-core",
+    "crates/odin-eval",
     "crates/odin-runtime",
     "crates/odin-loop",
     "crates/odin-providers",
@@ -15,13 +16,15 @@ members = [
     "crates/odin-cli", "crates/odin-baseline",
     "crates/odin-mcp",
     "crates/odin-orchestrator",
+    "crates/odin-tui",
 ]
 
 [workspace.package]
 version = "0.3.0"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT"
-repository = "https://github.com/hermes-gadget/raven-agent"
+repository = "https://github.com/hermes-gadget/raven-ai-harness"
 authors = ["Raven Agent Contributors"]
 
 [workspace.dependencies]
@@ -72,6 +75,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 
 # Odin internal crates
 odin-core = { path = "crates/odin-core" }
+odin-eval = { path = "crates/odin-eval" }
 odin-runtime = { path = "crates/odin-runtime" }
 odin-loop = { path = "crates/odin-loop" }
 odin-providers = { path = "crates/odin-providers" }

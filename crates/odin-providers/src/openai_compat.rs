@@ -6,6 +6,7 @@ use odin_core::traits::{ChatStream, Provider};
 use odin_core::types::*;
 use reqwest::Client;
 use serde_json::Value;
+use std::time::Duration;
 
 /// Provider for any OpenAI-compatible API endpoint.
 pub struct OpenAiCompatProvider {
@@ -21,9 +22,27 @@ impl OpenAiCompatProvider {
         base_url: impl Into<String>,
         api_key: Option<String>,
     ) -> Self {
+        Self::new_with_timeout(name, base_url, api_key, None)
+    }
+
+    pub fn new_with_timeout(
+        name: impl Into<String>,
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        timeout_secs: Option<u64>,
+    ) -> Self {
+        let client = timeout_secs
+            .filter(|secs| *secs > 0)
+            .and_then(|secs| {
+                Client::builder()
+                    .timeout(Duration::from_secs(secs))
+                    .build()
+                    .ok()
+            })
+            .unwrap_or_default();
         Self {
             name: name.into(),
-            client: Client::new(),
+            client,
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key,
         }

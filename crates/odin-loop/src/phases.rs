@@ -1,18 +1,23 @@
 //! Individual loop phase implementations.
 //!
-//! Each phase is a self-contained function that transforms loop state.
-//! For production use, phases would call the model provider for LLM-guided
-//! execution. The implementations here provide the structure and hooks.
+//! Each phase is a self-contained function that transforms loop state, using
+//! a configured provider when present and deterministic heuristics otherwise.
 
 use async_trait::async_trait;
 use odin_core::error::OdinResult;
-use odin_core::traits::{AuditLogger, LoopState, PhaseRecord, PhaseResult, Provider, ToolContext};
+use odin_core::traits::{
+    AuditLogger, LoopState, PermissionEngine, PhaseRecord, PhaseResult, Provider, ToolContext,
+};
 use odin_core::types::*;
 use odin_permissions::SecretRedactor;
 use std::sync::Arc;
 
 use crate::confidence::ConfidenceScorer;
-use crate::decomposer::{DecomposedPlan, Dependency, GoalDecomposer};
+use crate::decomposer::{DecomposedPlan, GoalDecomposer};
+use crate::small_model::{
+    SmallModelProfile, parse_plan_response, repair_tool_argument_value, repair_tool_arguments_once,
+    verify_evidence,
+};
 use crate::summarizer::StateSummarizer;
 
 // ── Phase Traits ────────────────────────────────────────────────────
@@ -34,6 +39,8 @@ pub struct PhaseContext {
     pub decomposer: GoalDecomposer,
     pub summarizer: StateSummarizer,
     pub plan: Option<DecomposedPlan>,
+    /// Model name to pass to the provider (e.g., "deepseek-v4-pro")
+    pub model_name: String,
     /// Optional LLM provider for real model calls
     pub provider: Option<Arc<dyn Provider>>,
     /// Optional stronger provider for escalation
@@ -46,6 +53,8 @@ pub struct PhaseContext {
     pub skill_registry: Option<Arc<odin_skills::SkillRegistry>>,
     /// Optional audit logger for recording tool calls and events
     pub audit_logger: Option<Arc<dyn AuditLogger>>,
+    /// Optional small/local model profile for bounded prompts and retries
+    pub model_profile: Option<SmallModelProfile>,
 }
 
 // ── Plan Phase ──────────────────────────────────────────────────────
@@ -69,7 +78,7 @@ impl Phase for PlanPhase {
         state: &mut LoopState,
         context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
-        tracing::info!("[PLAN] Planning for task: {}", state.task.goal);
+        tracing::info!(task_id = %state.task.id, "Planning task");
 
         // Inject available skills into the system prompt if a registry is loaded
         if let Some(ref registry) = context.skill_registry {
@@ -106,54 +115,42 @@ impl Phase for PlanPhase {
 
         // Try LLM-based decomposition if a provider is available
         let plan = if let Some(ref provider) = context.provider {
-            let prompt = "Break this goal into sub-tasks. List each sub-task as a separate line starting with '- '. Keep descriptions concise and actionable.";
+            let prompt = context.model_profile.as_ref().map_or_else(
+                || {
+                    "Break this goal into sub-tasks. Prefer JSON with \
+                     {\"sub_tasks\":[{\"id\":\"task_1\",\"description\":\"short action\"}]}; \
+                     if you cannot, list each sub-task as '- '. Keep descriptions concise and actionable."
+                        .to_string()
+                },
+                SmallModelProfile::plan_prompt,
+            );
             let mut msgs = state.messages.clone();
             msgs.push(Message::user(prompt));
             match provider
-                .chat("", &msgs, &[], &CompletionOptions::default())
+                .chat(
+                    &context.model_name,
+                    &msgs,
+                    &[],
+                    &CompletionOptions::default(),
+                )
                 .await
             {
                 Ok(response) => {
                     let text = response.message.text().unwrap_or("").to_string();
                     tracing::info!("[PLAN] LLM decomposition response received");
-                    // Parse sub-tasks from the LLM response
-                    let sub_tasks: Vec<SubTask> = text
-                        .lines()
-                        .filter(|line| line.trim().starts_with("- "))
-                        .enumerate()
-                        .map(|(i, line)| SubTask {
-                            id: format!("sub_{}", i + 1),
-                            description: line.trim().trim_start_matches("- ").to_string(),
-                            status: SubTaskStatus::Pending,
-                            result: None,
-                        })
-                        .collect();
-
-                    if sub_tasks.is_empty() {
+                    if let Some(plan) =
+                        parse_plan_response(&state.task.goal, &text, self.decomposer.max_sub_tasks)
+                    {
+                        plan
+                    } else {
                         tracing::warn!(
                             "[PLAN] LLM returned no parseable sub-tasks, falling back to heuristic"
                         );
                         self.decomposer.decompose_heuristic(&state.task.goal)
-                    } else {
-                        // Build sequential dependencies
-                        let dependencies: Vec<Dependency> = sub_tasks
-                            .windows(2)
-                            .map(|pair| Dependency {
-                                from: pair[0].id.clone(),
-                                to: pair[1].id.clone(),
-                                reason: "Sequential order".into(),
-                            })
-                            .collect();
-
-                        DecomposedPlan {
-                            goal: state.task.goal.clone(),
-                            sub_tasks,
-                            dependencies,
-                        }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("[PLAN] LLM call failed: {}", e);
+                Err(_error) => {
+                    tracing::warn!("Planning model call failed; using heuristic decomposition");
                     self.decomposer.decompose_heuristic(&state.task.goal)
                 }
             }
@@ -228,9 +225,14 @@ impl Phase for ActPhase {
                 .map(|st| st.description.as_str())
                 .unwrap_or("the current goal");
 
-            let prompt = format!(
-                "You are working on: {}\nGoal: {}\nDecide what action to take next. If you need a tool, specify which one. Otherwise, provide the result.",
-                pending_desc, state.task.goal
+            let prompt = context.model_profile.as_ref().map_or_else(
+                || {
+                    format!(
+                        "You are working on: {}\nGoal: {}\nDecide what action to take next. If you need a tool, specify which one. Otherwise, provide the result.",
+                        pending_desc, state.task.goal
+                    )
+                },
+                |profile| profile.action_prompt(pending_desc, &state.task.goal),
             );
 
             let mut msgs = state.messages.clone();
@@ -242,7 +244,16 @@ impl Phase for ActPhase {
                 ..Default::default()
             };
 
-            match provider.chat("", &msgs, &[], &options).await {
+            let tool_schemas: Vec<ToolSchema> = context
+                .tool_registry
+                .as_ref()
+                .map(|r| r.list_schemas())
+                .unwrap_or_default();
+
+            match provider
+                .chat(&context.model_name, &msgs, &tool_schemas, &options)
+                .await
+            {
                 Ok(response) => {
                     let text = response.message.text().unwrap_or("").to_string();
                     let calls = response.message.tool_calls().to_vec();
@@ -278,89 +289,73 @@ impl Phase for ActPhase {
                                     }
                                 };
 
+                                let schema = tool.schema();
                                 let args: serde_json::Value =
                                     match serde_json::from_str(&tc.function.arguments) {
-                                        Ok(v) => v,
-                                        Err(e) => {
-                                            let tr = ToolResult {
-                                                call_id: tc.id.clone(),
-                                                tool_name: tool_name.clone(),
-                                                success: false,
-                                                output: String::new(),
-                                                error: Some(format!("Invalid tool args: {}", e)),
-                                                duration_ms: 0,
-                                                timestamp: chrono::Utc::now(),
-                                            };
-                                            results.push(tr);
-                                            continue;
+                                        Ok(value) => match tool.validate_args(&value) {
+                                            Ok(()) => value,
+                                            Err(validation_error) => {
+                                                match repair_tool_argument_value(
+                                                    &tool_name, value, &schema,
+                                                ) {
+                                                    Some(repair)
+                                                        if tool
+                                                            .validate_args(&repair.args)
+                                                            .is_ok() =>
+                                                    {
+                                                        tracing::info!(
+                                                            tool = %tool_name,
+                                                            reason = %repair.reason,
+                                                            "[ACT] Repaired parsed tool arguments"
+                                                        );
+                                                        repair.args
+                                                    }
+                                                    _ => {
+                                                        let tr = tool_arg_error_result(
+                                                            &tc,
+                                                            &tool_name,
+                                                            format!(
+                                                                "Invalid tool args: {}",
+                                                                validation_error
+                                                            ),
+                                                        );
+                                                        results.push(tr);
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        Err(parse_error) => {
+                                            match repair_tool_arguments_once(
+                                                &tool_name,
+                                                &tc.function.arguments,
+                                                &schema,
+                                            ) {
+                                                Some(repair)
+                                                    if tool.validate_args(&repair.args).is_ok() =>
+                                                {
+                                                    tracing::info!(
+                                                        tool = %tool_name,
+                                                        reason = %repair.reason,
+                                                        "[ACT] Repaired malformed tool arguments"
+                                                    );
+                                                    repair.args
+                                                }
+                                                _ => {
+                                                    let tr = tool_arg_error_result(
+                                                        &tc,
+                                                        &tool_name,
+                                                        format!(
+                                                            "Invalid tool args: {}",
+                                                            parse_error
+                                                        ),
+                                                    );
+                                                    results.push(tr);
+                                                    continue;
+                                                }
+                                            }
                                         }
                                     };
-
-                                // Check policy engine before executing tool
-                                let policy_denied = if let Some(ref policy) = context.policy_engine
-                                {
-                                    // For shell tools: check dangerous commands
-                                    if tool_name == "shell" {
-                                        if let Some(cmd) =
-                                            args.get("command").and_then(|v| v.as_str())
-                                        {
-                                            policy.is_dangerous_command(cmd)
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    // For file_write: check path boundaries
-                                    else if tool_name == "file_write" {
-                                        if let Some(path) =
-                                            args.get("path").and_then(|v| v.as_str())
-                                        {
-                                            policy
-                                                .check_path_boundary(
-                                                    std::path::Path::new(path),
-                                                    true,
-                                                )
-                                                .is_err()
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    // For file_read: check path boundaries
-                                    else if tool_name == "file_read" {
-                                        if let Some(path) =
-                                            args.get("path").and_then(|v| v.as_str())
-                                        {
-                                            policy
-                                                .check_path_boundary(
-                                                    std::path::Path::new(path),
-                                                    false,
-                                                )
-                                                .is_err()
-                                        } else {
-                                            false
-                                        }
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                };
-
-                                if policy_denied {
-                                    let tr = ToolResult {
-                                        call_id: tc.id.clone(),
-                                        tool_name: tool_name.clone(),
-                                        success: false,
-                                        output: String::new(),
-                                        error: Some(format!(
-                                            "Permission denied: tool '{}' blocked by policy",
-                                            tool_name
-                                        )),
-                                        duration_ms: 0,
-                                        timestamp: chrono::Utc::now(),
-                                    };
-                                    results.push(tr);
-                                    continue;
-                                }
 
                                 let tool_context = ToolContext {
                                     agent_id: uuid::Uuid::default(),
@@ -368,6 +363,128 @@ impl Phase for ActPhase {
                                     working_dir: std::env::current_dir().unwrap_or_default(),
                                     env: std::collections::HashMap::new(),
                                 };
+
+                                // Enforce rate limits, explicit policy rules, approval gates,
+                                // dangerous-command checks, and filesystem boundaries before
+                                // calling any tool implementation.
+                                let policy_error = if let Some(ref policy) = context.policy_engine {
+                                    let mut error = None;
+
+                                    match policy
+                                        .check_rate_limit(tool_context.agent_id, &tool_name)
+                                        .await
+                                    {
+                                        Ok(true) => {}
+                                        Ok(false) => {
+                                            error = Some(format!(
+                                                "Rate limit exceeded for tool '{tool_name}'"
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            error = Some(format!("Rate-limit check failed: {e}"))
+                                        }
+                                    }
+
+                                    let action = if error.is_none() {
+                                        match policy
+                                            .check_tool(tool_context.agent_id, &tool_name, &args)
+                                            .await
+                                        {
+                                            Ok(action) => Some(action),
+                                            Err(e) => {
+                                                error =
+                                                    Some(format!("Permission check failed: {e}"));
+                                                None
+                                            }
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(PermissionAction::Deny) = action {
+                                        error = Some(format!(
+                                            "Tool '{tool_name}' is denied by the permission policy"
+                                        ));
+                                    }
+
+                                    let needs_approval =
+                                        matches!(action, Some(PermissionAction::AskUser))
+                                            || (matches!(action, Some(PermissionAction::Allow))
+                                                && tool.requires_approval()
+                                                && policy.requires_approval());
+                                    if error.is_none() && needs_approval {
+                                        match policy
+                                            .request_approval(
+                                                tool_context.agent_id,
+                                                &tool_name,
+                                                &args.to_string(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(true) => {}
+                                            Ok(false) => {
+                                                error = Some(format!(
+                                                    "Approval required for tool '{tool_name}', but the action was not approved"
+                                                ));
+                                            }
+                                            Err(e) => {
+                                                error =
+                                                    Some(format!("Approval request failed: {e}"));
+                                            }
+                                        }
+                                    }
+
+                                    if error.is_none()
+                                        && tool_name == "shell"
+                                        && let Some(command) =
+                                            args.get("command").and_then(|value| value.as_str())
+                                        && matches!(
+                                            policy
+                                                .check_command(tool_context.agent_id, command)
+                                                .await,
+                                            Ok(PermissionAction::AskUser | PermissionAction::Deny)
+                                        )
+                                    {
+                                        error = Some(
+                                            "Dangerous shell command requires explicit approval"
+                                                .to_string(),
+                                        );
+                                    }
+
+                                    if error.is_none()
+                                        && matches!(tool_name.as_str(), "file_read" | "file_write")
+                                        && let Some(path) =
+                                            args.get("path").and_then(|value| value.as_str())
+                                        && let Err(e) = policy.check_path_boundary(
+                                            std::path::Path::new(path),
+                                            tool_name == "file_write",
+                                        )
+                                    {
+                                        error = Some(e.to_string());
+                                    }
+
+                                    error
+                                } else if tool.requires_approval() {
+                                    Some(format!(
+                                        "Tool '{tool_name}' requires approval, but no permission engine is configured"
+                                    ))
+                                } else {
+                                    None
+                                };
+
+                                if let Some(error) = policy_error {
+                                    let tr = ToolResult {
+                                        call_id: tc.id.clone(),
+                                        tool_name: tool_name.clone(),
+                                        success: false,
+                                        output: String::new(),
+                                        error: Some(error),
+                                        duration_ms: 0,
+                                        timestamp: chrono::Utc::now(),
+                                    };
+                                    results.push(tr);
+                                    continue;
+                                }
 
                                 let start = std::time::Instant::now();
                                 // Capture input summary before moving args into execute
@@ -393,13 +510,11 @@ impl Phase for ActPhase {
 
                                 // Audit log the tool call
                                 if let Some(ref audit_logger) = context.audit_logger {
-                                    let permission_decision =
-                                        if policy_denied { "denied" } else { "allowed" };
                                     let details = serde_json::json!({
                                         "input_summary": input_summary,
                                         "result": if tr.success { "success" } else { "failure" },
                                         "duration_ms": tr.duration_ms,
-                                        "permission_decision": permission_decision,
+                                        "permission_decision": "allowed",
                                     });
                                     let audit_entry = AuditEntry {
                                         id: uuid::Uuid::new_v4(),
@@ -422,18 +537,18 @@ impl Phase for ActPhase {
                             }
                             results
                         } else {
-                            // No tool registry — simulate results
+                            // A model requested tools that this engine cannot dispatch.
                             calls
                                 .iter()
                                 .map(|tc| ToolResult {
                                     call_id: tc.id.clone(),
                                     tool_name: tc.function.name.clone(),
-                                    success: true,
-                                    output: format!(
-                                        "[Simulated] Executed {} with args: {}",
-                                        tc.function.name, tc.function.arguments
-                                    ),
-                                    error: None,
+                                    success: false,
+                                    output: String::new(),
+                                    error: Some(format!(
+                                        "Tool '{}' cannot run because no tool registry is configured",
+                                        tc.function.name
+                                    )),
                                     duration_ms: 0,
                                     timestamp: chrono::Utc::now(),
                                 })
@@ -461,7 +576,7 @@ impl Phase for ActPhase {
                 }
             }
         } else {
-            // Stub mode — no provider attached
+            // Offline heuristic mode — no provider attached.
             let pending = context.plan.as_ref().and_then(|p| {
                 p.sub_tasks
                     .iter()
@@ -516,17 +631,21 @@ impl Phase for InspectPhase {
     async fn execute(
         &self,
         state: &mut LoopState,
-        _context: &PhaseContext,
+        context: &PhaseContext,
     ) -> OdinResult<PhaseResult> {
         tracing::info!("[INSPECT] Inspecting results of action");
 
         state.current_phase = LoopPhase::Inspect;
 
         // Check context window
-        let needs_compression = self.summarizer.needs_compression(
-            &state.messages,
-            32768, // Default context limit; use config in production
-        );
+        let context_limit = context
+            .model_profile
+            .as_ref()
+            .map(|profile| profile.context_tokens)
+            .unwrap_or(32_768);
+        let needs_compression = self
+            .summarizer
+            .needs_compression(&state.messages, context_limit);
 
         if needs_compression {
             tracing::info!("[INSPECT] Context window nearing limit, compressing...");
@@ -626,7 +745,12 @@ impl Phase for CritiquePhase {
             let mut msgs = state.messages.clone();
             msgs.push(Message::user(prompt));
             match provider
-                .chat("", &msgs, &[], &CompletionOptions::default())
+                .chat(
+                    &context.model_name,
+                    &msgs,
+                    &[],
+                    &CompletionOptions::default(),
+                )
                 .await
             {
                 Ok(response) => {
@@ -645,8 +769,8 @@ impl Phase for CritiquePhase {
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("[CRITIQUE] LLM call failed: {}", e);
+                Err(_error) => {
+                    tracing::warn!("Critique model call failed; using heuristic scoring");
                     fallback_critique_confidence(state, &self.scorer)
                 }
             }
@@ -655,9 +779,15 @@ impl Phase for CritiquePhase {
             fallback_critique_confidence(state, &self.scorer)
         };
 
+        let retry_limit = context
+            .model_profile
+            .as_ref()
+            .map(|profile| profile.retry_limit)
+            .unwrap_or(2);
+
         let decision = if confidence.is_high() {
             LoopDecision::Continue
-        } else if confidence.is_low() && state.retry_count >= 2 {
+        } else if confidence.is_low() && state.retry_count >= retry_limit {
             LoopDecision::Escalate
         } else if confidence.is_low() {
             LoopDecision::Retry
@@ -737,7 +867,12 @@ impl Phase for RevisePhase {
             let mut msgs = state.messages.clone();
             msgs.push(Message::user(prompt));
             match provider
-                .chat("", &msgs, &[], &CompletionOptions::default())
+                .chat(
+                    &context.model_name,
+                    &msgs,
+                    &[],
+                    &CompletionOptions::default(),
+                )
                 .await
             {
                 Ok(response) => {
@@ -745,8 +880,8 @@ impl Phase for RevisePhase {
                     tracing::info!("[REVISE] LLM revision suggestion received");
                     text
                 }
-                Err(e) => {
-                    tracing::warn!("[REVISE] LLM call failed: {}", e);
+                Err(_error) => {
+                    tracing::warn!("Revision model call failed; using heuristic strategy");
                     fallback_revise_strategy(state.retry_count)
                 }
             }
@@ -760,7 +895,13 @@ impl Phase for RevisePhase {
             strategy, state.retry_count
         )));
 
-        let decision = if state.retry_count >= 3 {
+        let retry_limit = context
+            .model_profile
+            .as_ref()
+            .map(|profile| profile.retry_limit)
+            .unwrap_or(3);
+
+        let decision = if state.retry_count >= retry_limit {
             LoopDecision::Escalate
         } else {
             LoopDecision::Retry
@@ -819,7 +960,7 @@ impl Phase for VerifyPhase {
         });
 
         // Try LLM-based verification if a provider is available
-        let (verification, confidence) = if let Some(ref provider) = context.provider {
+        let (mut verification, mut confidence) = if let Some(ref provider) = context.provider {
             let criteria_summary = if state.task.success_criteria.is_empty() {
                 "No specific success criteria defined.".to_string()
             } else {
@@ -853,7 +994,12 @@ impl Phase for VerifyPhase {
             let mut msgs = state.messages.clone();
             msgs.push(Message::user(prompt));
             match provider
-                .chat("", &msgs, &[], &CompletionOptions::default())
+                .chat(
+                    &context.model_name,
+                    &msgs,
+                    &[],
+                    &CompletionOptions::default(),
+                )
                 .await
             {
                 Ok(response) => {
@@ -879,8 +1025,8 @@ impl Phase for VerifyPhase {
 
                     (text, conf)
                 }
-                Err(e) => {
-                    tracing::warn!("[VERIFY] LLM call failed: {}", e);
+                Err(_error) => {
+                    tracing::warn!("Verification model call failed; using heuristic verification");
                     // Fall through to heuristic
                     let verification = match current_task {
                         Some(task) => {
@@ -925,6 +1071,24 @@ impl Phase for VerifyPhase {
             };
             (verification, conf)
         };
+
+        if context.model_profile.is_some()
+            && (!state.task.success_criteria.is_empty() || !state.tool_results.is_empty())
+        {
+            let evidence = verify_evidence(state, &state.task.success_criteria);
+            if !evidence.verified {
+                confidence = ConfidenceScore::new(confidence.value().min(evidence.confidence));
+                verification.push_str(&format!(
+                    "\nEvidence missing: {}",
+                    evidence.missing.join(", ")
+                ));
+            } else if !evidence.evidence.is_empty() {
+                verification.push_str(&format!(
+                    "\nEvidence checked: {}",
+                    evidence.evidence.join(", ")
+                ));
+            }
+        }
 
         let record = PhaseRecord {
             phase: LoopPhase::Verify,
@@ -1003,8 +1167,14 @@ impl Phase for DecidePhase {
             .find(|r| r.confidence.is_some())
             .and_then(|r| r.confidence);
 
+        let retry_limit = context
+            .model_profile
+            .as_ref()
+            .map(|profile| profile.retry_limit)
+            .unwrap_or(2);
+
         let decision = match last_confidence {
-            Some(c) if c.is_low() && state.retry_count >= 2 => LoopDecision::Escalate,
+            Some(c) if c.is_low() && state.retry_count >= retry_limit => LoopDecision::Escalate,
             Some(c) if c.is_low() => LoopDecision::Retry,
             _ => LoopDecision::Continue,
         };
@@ -1033,6 +1203,18 @@ impl Phase for DecidePhase {
 }
 
 // ── Helper Functions ──────────────────────────────────────────────────
+
+fn tool_arg_error_result(tc: &ToolCall, tool_name: &str, error: String) -> ToolResult {
+    ToolResult {
+        call_id: tc.id.clone(),
+        tool_name: tool_name.to_string(),
+        success: false,
+        output: String::new(),
+        error: Some(error),
+        duration_ms: 0,
+        timestamp: chrono::Utc::now(),
+    }
+}
 
 /// Parse a confidence score (0.0–1.0) from LLM response text.
 ///

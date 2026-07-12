@@ -1,7 +1,7 @@
 //! Adapter that wraps MCP tools as [`odin_core::traits::Tool`] implementations.
 //!
 //! [`McpToolAdapter`] bridges between MCP tool definitions discovered from
-//! a server and the Odin tool trait system, allowing MCP tools to be
+//! a server and Raven Agent's tool trait system, allowing MCP tools to be
 //! registered in a [`ToolRegistry`] alongside built-in tools.
 
 use crate::client::McpClient;
@@ -15,7 +15,7 @@ use odin_core::types::{FunctionSchema, ToolResult, ToolSchema};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-/// An adapter that wraps an MCP server tool as an Odin [`Tool`].
+/// An adapter that wraps an MCP server tool as a Raven Agent [`Tool`].
 ///
 /// When executed, it forwards the call to the MCP server via the shared
 /// [`McpClient`] and converts the response into a [`ToolResult`].
@@ -25,8 +25,7 @@ pub struct McpToolAdapter {
     /// Shared reference to the client managing the MCP connection.
     client: Arc<Mutex<McpClient>>,
     /// Capability tags for this tool.
-    #[allow(dead_code)]
-    tags: Vec<String>,
+    tags: Vec<&'static str>,
     /// Whether this tool requires user approval.
     requires_approval: bool,
     /// Whether this tool is safe.
@@ -37,12 +36,13 @@ impl McpToolAdapter {
     /// Create a new adapter wrapping an MCP tool definition.
     ///
     /// The `client` is shared across all tools from the same MCP server.
-    /// Default capability tags are `["mcp", "external", "safe"]`.
+    /// External tools are unsafe and approval-gated by default because MCP
+    /// discovery does not include a portable safety classification.
     pub fn new(def: McpToolDef, client: Arc<Mutex<McpClient>>) -> Self {
         Self {
-            tags: vec!["mcp".into(), "external".into(), "safe".into()],
-            requires_approval: false,
-            safe: true,
+            tags: vec!["mcp", "external", "dangerous"],
+            requires_approval: true,
+            safe: false,
             def,
             client,
         }
@@ -55,9 +55,12 @@ impl McpToolAdapter {
         tags: Vec<String>,
     ) -> Self {
         Self {
-            tags,
-            requires_approval: false,
-            safe: true,
+            tags: tags
+                .into_iter()
+                .map(|tag| Box::leak(tag.into_boxed_str()) as &'static str)
+                .collect(),
+            requires_approval: true,
+            safe: false,
             def,
             client,
         }
@@ -72,10 +75,13 @@ impl McpToolAdapter {
     /// Mark this tool as safe or unsafe.
     pub fn with_safety(mut self, safe: bool) -> Self {
         self.safe = safe;
+        self.tags
+            .retain(|tag| *tag != "safe" && *tag != "dangerous");
+        self.tags.push(if safe { "safe" } else { "dangerous" });
         self
     }
 
-    /// Convert an MCP `inputSchema` (JSON Schema) into the Odin
+    /// Convert an MCP `inputSchema` (JSON Schema) into the Raven Agent
     /// [`ToolSchema`] format expected by models.
     ///
     /// This simply maps the tool's name and description with the raw
@@ -171,12 +177,7 @@ impl Tool for McpToolAdapter {
     }
 
     fn capability_tags(&self) -> &[&str] {
-        // We store tags as Vec<String>, so we return a static slice
-        // by collecting into a temporary. Since the trait returns &[&str],
-        // we handle this via an internal static or by leaking.
-        // For simplicity, we return an empty slice and provide the tags
-        // through the struct methods.
-        &[]
+        &self.tags
     }
 
     fn is_dangerous(&self) -> bool {
@@ -194,7 +195,7 @@ impl Tool for McpToolAdapter {
     }
 }
 
-/// Map MCP errors to Odin errors.
+/// Map MCP errors to the shared internal error type.
 fn map_mcp_error(tool_name: &str, err: McpError) -> OdinError {
     match err {
         McpError::Transport(msg) => OdinError::tool(tool_name, format!("Transport error: {msg}")),
@@ -379,10 +380,11 @@ mod tests {
             ))))),
         );
 
-        // Default safety
-        assert!(adapter.is_safe());
-        assert!(!adapter.is_dangerous());
-        assert!(!adapter.requires_approval());
+        // Unknown external tools fail closed by default.
+        assert!(!adapter.is_safe());
+        assert!(adapter.is_dangerous());
+        assert!(adapter.requires_approval());
+        assert!(adapter.capability_tags().contains(&"dangerous"));
     }
 
     #[test]

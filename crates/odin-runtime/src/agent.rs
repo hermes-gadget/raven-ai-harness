@@ -48,7 +48,7 @@ impl Agent {
 
     /// Execute a task through the agent's loop engine.
     pub async fn execute_task(&self, task: &AgentTask) -> OdinResult<TaskResult> {
-        tracing::info!("[AGENT {}] Executing task: {}", self.name, task.goal);
+        tracing::info!(agent_id = %self.id, task_id = %task.id, "Agent executing task");
         self.engine.execute_task(task).await
     }
 
@@ -118,11 +118,23 @@ mod tests {
             _phase: odin_core::types::LoopPhase,
             _state: &mut odin_core::traits::LoopState,
         ) -> OdinResult<odin_core::traits::PhaseResult> {
-            unimplemented!("not used in tests")
+            Err(odin_core::error::OdinError::Other(
+                "mock engine does not expose phases".into(),
+            ))
         }
 
         fn state_summary(&self) -> odin_core::types::StateSummary {
-            unimplemented!("not used in tests")
+            odin_core::types::StateSummary {
+                goal: String::new(),
+                current_phase: odin_core::types::LoopPhase::Plan,
+                completed_steps: vec![],
+                pending_steps: vec![],
+                last_action: None,
+                last_result: None,
+                errors: vec![],
+                confidence: 1.0,
+                token_usage: odin_core::types::TokenUsage::default(),
+            }
         }
 
         fn confidence(&self) -> odin_core::types::ConfidenceScore {
@@ -150,7 +162,9 @@ mod tests {
             _tools: &[odin_core::types::ToolSchema],
             _options: &odin_core::types::CompletionOptions,
         ) -> OdinResult<odin_core::types::ChatResponse> {
-            unimplemented!("not used in tests")
+            Err(odin_core::error::OdinError::Other(
+                "mock provider chat is not used".into(),
+            ))
         }
 
         async fn chat_stream(
@@ -160,7 +174,9 @@ mod tests {
             _tools: &[odin_core::types::ToolSchema],
             _options: &odin_core::types::CompletionOptions,
         ) -> OdinResult<Box<dyn odin_core::traits::ChatStream>> {
-            unimplemented!("not used in tests")
+            Err(odin_core::error::OdinError::Other(
+                "mock provider does not stream".into(),
+            ))
         }
 
         async fn health_check(&self) -> OdinResult<bool> {
@@ -210,7 +226,9 @@ mod tests {
                 _args: serde_json::Value,
                 _context: &odin_core::traits::ToolContext,
             ) -> OdinResult<odin_core::types::ToolResult> {
-                unimplemented!()
+                Err(odin_core::error::OdinError::Other(
+                    "mock tool execution is not used".into(),
+                ))
             }
         }
 

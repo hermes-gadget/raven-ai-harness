@@ -232,7 +232,7 @@ impl MergeResolver {
         }
 
         summary.push_str(
-            "\n> Manual resolution required. Use `odin merge resolve` to handle conflicts.",
+            "\n> Manual resolution required; inspect the listed files before applying either result.",
         );
         summary
     }

@@ -1,4 +1,4 @@
-//! Core types used across all Odin crates.
+//! Core types shared by Raven Agent's internal crates.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -421,6 +421,7 @@ pub enum AuditResult {
 pub struct PermissionRule {
     pub tool_name: String,
     pub action: PermissionAction,
+    #[serde(default)]
     pub require_approval: bool,
     pub max_rate_per_minute: Option<u32>,
 }

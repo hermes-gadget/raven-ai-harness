@@ -11,7 +11,6 @@ use odin_core::types::*;
 #[derive(Debug, Clone)]
 pub struct StateSummarizer {
     /// Maximum tokens to keep in the summary
-    #[allow(dead_code)]
     max_summary_tokens: u32,
 }
 
@@ -149,7 +148,15 @@ impl StateSummarizer {
             summary.token_usage.total_tokens
         ));
 
-        parts.join("\n\n")
+        let prompt = parts.join("\n\n");
+        let max_chars = self.max_summary_tokens as usize * 4;
+        if prompt.chars().count() > max_chars {
+            let mut truncated: String = prompt.chars().take(max_chars).collect();
+            truncated.push_str("\n[summary truncated]");
+            truncated
+        } else {
+            prompt
+        }
     }
 
     /// Estimate token count for messages (rough: ~4 chars per token).

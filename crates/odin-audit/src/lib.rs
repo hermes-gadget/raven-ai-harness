@@ -1,4 +1,4 @@
-//! odin-audit — Audit logging for the Odin harness.
+//! `odin-audit` — audit logging for Raven Agent.
 //!
 //! Provides an [`AuditLogger`] implementation that writes structured
 //! audit entries to file and/or SQLite databases, supporting queries
@@ -6,4 +6,4 @@
 
 pub mod logger;
 
-pub use logger::AuditLoggerImpl;
+pub use logger::{AuditLoggerConfig, AuditLoggerImpl};

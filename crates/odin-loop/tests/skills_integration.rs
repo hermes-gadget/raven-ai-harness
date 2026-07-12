@@ -99,12 +99,14 @@ async fn test_skills_loaded_and_injected_into_plan_phase() {
         decomposer: odin_loop::GoalDecomposer::default(),
         summarizer: odin_loop::StateSummarizer::default(),
         plan: None,
+        model_name: String::new(),
         provider: None,
         escalation_provider: None,
         tool_registry: None,
         policy_engine: None,
         skill_registry: Some(registry.clone()),
         audit_logger: None,
+        model_profile: None,
     };
 
     let plan_phase = odin_loop::PlanPhase::new(odin_loop::GoalDecomposer::default());
@@ -116,7 +118,7 @@ async fn test_skills_loaded_and_injected_into_plan_phase() {
     assert!(
         text.contains("Available Skills"),
         "System prompt should contain 'Available Skills', got: {}...",
-        &text[..text.len().min(200)]
+        text.chars().take(200).collect::<String>()
     );
     assert!(
         text.contains("code-review"),

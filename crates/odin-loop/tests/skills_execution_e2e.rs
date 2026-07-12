@@ -71,12 +71,14 @@ async fn test_skills_injected_via_loop_engine() {
         decomposer: GoalDecomposer::default(),
         summarizer: StateSummarizer::default(),
         plan: None,
+        model_name: String::new(),
         provider: None,
         escalation_provider: None,
         tool_registry: None,
         policy_engine: None,
         skill_registry: Some(registry.clone()),
         audit_logger: None,
+        model_profile: None,
     };
 
     let plan_phase = PlanPhase::new(GoalDecomposer::default());

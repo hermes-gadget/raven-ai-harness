@@ -53,8 +53,8 @@ impl McpClient {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
             "clientInfo": {
-                "name": "odin-mcp",
-                "version": "0.1.0"
+                "name": "raven-agent",
+                "version": env!("CARGO_PKG_VERSION")
             }
         });
 

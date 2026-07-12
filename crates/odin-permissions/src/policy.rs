@@ -1,4 +1,4 @@
-//! Permission policy engine for the Odin harness.
+//! Permission policy engine for Raven Agent.
 //!
 //! Implements [`PermissionEngine`] from odin-core, providing:
 //! - Tool call allow/deny rules based on configured rules
@@ -113,6 +113,11 @@ impl PolicyEngine {
             .any(|re| re.is_match(command))
     }
 
+    /// Whether tools marked as approval-required must be gated.
+    pub fn requires_approval(&self) -> bool {
+        self.require_approval
+    }
+
     /// Validate that a path is within the allowed boundaries.
     pub fn check_path_boundary(&self, path: &std::path::Path, write: bool) -> OdinResult<()> {
         let path_str = path.to_string_lossy();
@@ -217,22 +222,14 @@ impl odin_core::traits::PermissionEngine for PolicyEngine {
             return Ok(rule.action);
         }
 
-        // Default: allow but require approval if configured
-        if self.require_approval {
-            debug!(
-                agent_id = %agent_id,
-                tool = %tool_name,
-                "Tool permission check defaults to AskUser"
-            );
-            Ok(PermissionAction::AskUser)
-        } else {
-            debug!(
-                agent_id = %agent_id,
-                tool = %tool_name,
-                "Tool permission check defaults to Allow"
-            );
-            Ok(PermissionAction::Allow)
-        }
+        // Tool metadata determines whether the default path needs approval.
+        // Explicit rules still override this decision.
+        debug!(
+            agent_id = %agent_id,
+            tool = %tool_name,
+            "Tool permission check defaults to Allow"
+        );
+        Ok(PermissionAction::Allow)
     }
 
     /// Check if a shell command is allowed.
@@ -242,11 +239,7 @@ impl odin_core::traits::PermissionEngine for PolicyEngine {
         command: &str,
     ) -> OdinResult<PermissionAction> {
         if self.is_dangerous_command(command) {
-            warn!(
-                agent_id = %agent_id,
-                command = %command,
-                "Dangerous command detected"
-            );
+            warn!(agent_id = %agent_id, "Dangerous command detected; approval required");
             return Ok(PermissionAction::AskUser);
         }
 
@@ -302,10 +295,11 @@ impl odin_core::traits::PermissionEngine for PolicyEngine {
     ) -> OdinResult<bool> {
         // In the current implementation, we log and deny by default.
         // A real implementation would prompt via the gateway.
+        let redactor = crate::redact::SecretRedactor::full();
         warn!(
-            action = %action,
-            details = %details,
-            "Approval requested but no interactive approval mechanism available — denying"
+            action = %redactor.redact(action),
+            details = %redactor.redact(details),
+            "Approval requested but no approval responder is connected; denying"
         );
         Ok(false)
     }
@@ -329,8 +323,7 @@ mod tests {
             .check_tool(agent, "file_read", &serde_json::json!({}))
             .await
             .unwrap();
-        // Default with require_approval=true returns AskUser
-        assert_eq!(result, PermissionAction::AskUser);
+        assert_eq!(result, PermissionAction::Allow);
     }
 
     #[tokio::test]

@@ -97,10 +97,10 @@ impl PersistedJob {
         }
     }
 
-    /// Convert back into a `Job` with a no-op task placeholder.
+    /// Convert back into a `Job` with an inert closure.
     ///
-    /// The caller should replace the task closure with the appropriate
-    /// runtime-driven task if `task_goal` is set.
+    /// Runtime-backed jobs are dispatched from `task_goal`; the inert closure
+    /// is never executed for those jobs.
     pub fn into_job(self) -> Job {
         let schedule = Schedule::parse(&self.cron_expr)
             .unwrap_or_else(|_| Schedule::parse("* * * * *").unwrap());

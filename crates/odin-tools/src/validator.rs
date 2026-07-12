@@ -461,19 +461,6 @@ impl DoctorReport {
         }
     }
 
-    #[allow(dead_code)]
-    fn add_check(&mut self, item: DoctorCheckItem) {
-        match item.status {
-            DoctorCheckStatus::Pass => self.summary.passed += 1,
-            DoctorCheckStatus::Fail => {
-                self.summary.failed += 1;
-                self.healthy = false;
-            }
-            DoctorCheckStatus::Warn => self.summary.warnings += 1,
-        }
-        self.summary.total_checks += 1;
-    }
-
     fn recalc(&mut self) {
         self.healthy = true;
         self.summary.passed = 0;

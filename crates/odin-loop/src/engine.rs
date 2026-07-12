@@ -13,11 +13,12 @@ use odin_core::types::*;
 use std::sync::Arc;
 
 use crate::confidence::ConfidenceScorer;
-use crate::decomposer::GoalDecomposer;
+use crate::decomposer::{DecomposedPlan, Dependency, GoalDecomposer};
 use crate::phases::{
     ActPhase, CritiquePhase, DecidePhase, InspectPhase, Phase, PhaseContext, PlanPhase,
     RevisePhase, VerifyPhase,
 };
+use crate::small_model::SmallModelProfile;
 use crate::summarizer::StateSummarizer;
 
 /// The main loop engine implementation.
@@ -30,7 +31,7 @@ pub struct Engine {
     summarizer: StateSummarizer,
     /// Maximum total iterations across all phases
     max_iterations: u32,
-    /// Optional provider for LLM calls (phases use stubs if None)
+    /// Optional provider for model calls (phases use deterministic heuristics if absent)
     provider: Option<Arc<dyn Provider>>,
     /// Optional stronger provider for escalation (used when confidence is low)
     escalation_provider: Option<Arc<dyn Provider>>,
@@ -42,10 +43,14 @@ pub struct Engine {
     skill_registry: Option<Arc<odin_skills::SkillRegistry>>,
     /// Optional audit logger for recording tool calls and events
     audit_logger: Option<Arc<dyn AuditLogger>>,
+    /// Model name to pass to the provider (e.g., "deepseek-v4-pro", "gpt-4o")
+    model_name: String,
+    /// Optional small/local model profile used to bound prompts, retries, and context.
+    model_profile: Option<SmallModelProfile>,
 }
 
 impl Engine {
-    /// Create a new loop engine with default settings (no LLM provider — stub mode).
+    /// Create a loop engine in offline heuristic mode until a provider is attached.
     pub fn new() -> Self {
         Self {
             confidence_scorer: ConfidenceScorer::default(),
@@ -58,12 +63,26 @@ impl Engine {
             policy_engine: None,
             skill_registry: None,
             audit_logger: None,
+            model_name: String::new(),
+            model_profile: None,
         }
     }
 
     /// Attach a model provider for real LLM calls.
     pub fn with_provider(mut self, provider: Arc<dyn Provider>) -> Self {
         self.provider = Some(provider);
+        self
+    }
+
+    /// Set the model name to use for LLM calls (e.g., "deepseek-v4-pro").
+    pub fn with_model_name(mut self, name: impl Into<String>) -> Self {
+        self.model_name = name.into();
+        self
+    }
+
+    /// Attach a small/local model profile for adaptive prompting and retries.
+    pub fn with_small_model_profile(mut self, profile: SmallModelProfile) -> Self {
+        self.model_profile = Some(profile);
         self
     }
 
@@ -130,18 +149,19 @@ impl LoopEngineTrait for Engine {
     async fn execute_task(&self, task: &AgentTask) -> OdinResult<TaskResult> {
         let start = std::time::Instant::now();
 
-        tracing::info!(
-            "[LOOP] Starting task: {} (max iterations: {})",
-            task.goal,
-            task.max_iterations
-        );
+        tracing::info!(task_id = %task.id, max_iterations = task.max_iterations, "Starting agent loop");
 
         // Initialize loop state
         let mut state = LoopState {
             task: task.clone(),
             messages: vec![
                 Message::system(
-                    "You are an AI agent. Follow the plan, execute carefully, and verify results.",
+                    self.model_profile
+                        .as_ref()
+                        .map(SmallModelProfile::system_instruction)
+                        .unwrap_or_else(|| {
+                            "You are an AI agent. Follow the plan, execute carefully, and verify results.".into()
+                        }),
                 ),
                 Message::user(format!("Goal: {}", task.goal)),
             ],
@@ -175,12 +195,14 @@ impl LoopEngineTrait for Engine {
             decomposer: self.decomposer.clone(),
             summarizer: self.summarizer.clone(),
             plan: Some(plan.clone()),
+            model_name: self.model_name.clone(),
             provider: self.provider.clone(),
             escalation_provider: self.escalation_provider.clone(),
             tool_registry: self.tool_registry.clone(),
             policy_engine: self.policy_engine.clone(),
             skill_registry: self.skill_registry.clone(),
             audit_logger: self.audit_logger.clone(),
+            model_profile: self.model_profile.clone(),
         };
 
         let mut total_tool_calls = 0u32;
@@ -198,6 +220,8 @@ impl LoopEngineTrait for Engine {
             // ── PLAN ── (only on first iteration — decomposition is done once)
             if state.iteration == 1 {
                 let result = plan_phase.execute(&mut state, &context).await?;
+                plan = plan_from_state(&state.task.goal, &state.task.sub_tasks);
+                context.plan = Some(plan.clone());
                 last_confidence = result.confidence;
                 if result.decision == LoopDecision::Stop {
                     break;
@@ -306,7 +330,7 @@ impl LoopEngineTrait for Engine {
             last_confidence.value() * 100.0
         );
 
-        tracing::info!("[LOOP] {}", summary);
+        tracing::info!(task_id = %task.id, success, iterations = state.iteration, "Agent loop finished");
 
         Ok(TaskResult {
             task_id: task.id,
@@ -335,12 +359,14 @@ impl LoopEngineTrait for Engine {
             decomposer: self.decomposer.clone(),
             summarizer: self.summarizer.clone(),
             plan: None,
+            model_name: self.model_name.clone(),
             provider: self.provider.clone(),
             escalation_provider: self.escalation_provider.clone(),
             tool_registry: self.tool_registry.clone(),
             policy_engine: self.policy_engine.clone(),
             skill_registry: self.skill_registry.clone(),
             audit_logger: self.audit_logger.clone(),
+            model_profile: self.model_profile.clone(),
         };
 
         match phase {
@@ -386,6 +412,24 @@ impl LoopEngineTrait for Engine {
 
     fn confidence(&self) -> ConfidenceScore {
         ConfidenceScore::new(0.5)
+    }
+}
+
+fn plan_from_state(goal: &str, sub_tasks: &[SubTask]) -> DecomposedPlan {
+    let sub_tasks = sub_tasks.to_vec();
+    let dependencies = sub_tasks
+        .windows(2)
+        .map(|pair| Dependency {
+            from: pair[0].id.clone(),
+            to: pair[1].id.clone(),
+            reason: "Sequential order".into(),
+        })
+        .collect();
+
+    DecomposedPlan {
+        goal: goal.to_string(),
+        sub_tasks,
+        dependencies,
     }
 }
 
@@ -526,7 +570,7 @@ mod tests {
             _tools: &[ToolSchema],
             _options: &CompletionOptions,
         ) -> OdinResult<Box<dyn ChatStream>> {
-            unimplemented!()
+            Err(OdinError::Other("mock provider does not stream".into()))
         }
         async fn health_check(&self) -> OdinResult<bool> {
             Ok(true)
@@ -632,7 +676,7 @@ mod tests {
                 _tools: &[ToolSchema],
                 _options: &CompletionOptions,
             ) -> OdinResult<Box<dyn ChatStream>> {
-                unimplemented!()
+                Err(OdinError::Other("mock provider does not stream".into()))
             }
             async fn health_check(&self) -> OdinResult<bool> {
                 Ok(false)
@@ -680,7 +724,7 @@ mod tests {
                 _tools: &[ToolSchema],
                 _options: &CompletionOptions,
             ) -> OdinResult<Box<dyn ChatStream>> {
-                unimplemented!()
+                Err(OdinError::Other("mock provider does not stream".into()))
             }
             async fn health_check(&self) -> OdinResult<bool> {
                 Ok(true)
@@ -724,7 +768,7 @@ mod tests {
                 _tools: &[ToolSchema],
                 _options: &CompletionOptions,
             ) -> OdinResult<Box<dyn ChatStream>> {
-                unimplemented!()
+                Err(OdinError::Other("mock provider does not stream".into()))
             }
             async fn health_check(&self) -> OdinResult<bool> {
                 Ok(true)
@@ -904,7 +948,7 @@ mod tests {
                 _tools: &[ToolSchema],
                 _options: &CompletionOptions,
             ) -> OdinResult<Box<dyn ChatStream>> {
-                unimplemented!()
+                Err(OdinError::Other("mock provider does not stream".into()))
             }
 
             async fn health_check(&self) -> OdinResult<bool> {

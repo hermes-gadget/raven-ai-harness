@@ -9,7 +9,6 @@
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Instant;
 use uuid::Uuid;
 
 /// Mode for a file lock.
@@ -30,8 +29,6 @@ pub struct FileLock {
     pub mode: LockMode,
     /// Agent ID holding the lock.
     pub agent_id: Uuid,
-    /// When the lock was acquired.
-    pub acquired_at: Instant,
 }
 
 /// Manages file-level locks for parallel sub-agent execution.
@@ -52,8 +49,6 @@ pub struct FileLockManager {
 #[derive(Debug, Clone)]
 struct QueuedWriter {
     agent_id: Uuid,
-    #[allow(dead_code)]
-    queued_at: Instant,
 }
 
 impl Default for FileLockManager {
@@ -76,8 +71,20 @@ impl FileLockManager {
     pub fn acquire_read(&self, path: &str, agent_id: Uuid) -> Result<(), String> {
         let mut entry = self.locks.entry(path.to_string()).or_default();
 
-        // Check if any write lock is held
-        if entry.iter().any(|l| l.mode == LockMode::Write) {
+        // A write lock held by this agent already grants read access, and
+        // repeated read acquisition must not create duplicate holders.
+        if entry
+            .iter()
+            .any(|lock| lock.agent_id == agent_id && lock.mode == LockMode::Write)
+            || entry
+                .iter()
+                .any(|lock| lock.agent_id == agent_id && lock.mode == LockMode::Read)
+        {
+            return Ok(());
+        }
+
+        // A different agent's write lock excludes readers.
+        if entry.iter().any(|lock| lock.mode == LockMode::Write) {
             return Err(format!(
                 "Cannot acquire read lock on '{}': write lock held",
                 path
@@ -88,15 +95,9 @@ impl FileLockManager {
             path: path.to_string(),
             mode: LockMode::Read,
             agent_id,
-            acquired_at: Instant::now(),
         });
 
-        tracing::debug!(
-            "[FILE_LOCK] Agent {} acquired READ lock on '{}' ({} holders)",
-            agent_id,
-            path,
-            entry.len()
-        );
+        tracing::debug!(agent_id = %agent_id, holders = entry.len(), "Read lock acquired");
         Ok(())
     }
 
@@ -106,33 +107,31 @@ impl FileLockManager {
     pub fn acquire_write(&self, path: &str, agent_id: Uuid) -> Result<(), String> {
         let mut entry = self.locks.entry(path.to_string()).or_default();
 
+        // Re-acquiring a lock that was granted from the queue is idempotent.
+        // Without this, a woken writer queues behind its own lock forever.
+        if entry
+            .iter()
+            .any(|lock| lock.mode == LockMode::Write && lock.agent_id == agent_id)
+        {
+            return Ok(());
+        }
+
         if entry.is_empty() {
             // No locks held — acquire immediately
             entry.push(FileLock {
                 path: path.to_string(),
                 mode: LockMode::Write,
                 agent_id,
-                acquired_at: Instant::now(),
             });
-            tracing::info!(
-                "[FILE_LOCK] Agent {} acquired WRITE lock on '{}'",
-                agent_id,
-                path
-            );
+            tracing::info!(agent_id = %agent_id, "Write lock acquired");
             Ok(())
         } else {
-            // Locks held — queue this writer
+            // Locks held — queue this writer once.
             let mut queue = self.write_queue.entry(path.to_string()).or_default();
-            queue.push_back(QueuedWriter {
-                agent_id,
-                queued_at: Instant::now(),
-            });
-            tracing::info!(
-                "[FILE_LOCK] Agent {} QUEUED for WRITE lock on '{}' (position: {})",
-                agent_id,
-                path,
-                queue.len()
-            );
+            if !queue.iter().any(|writer| writer.agent_id == agent_id) {
+                queue.push_back(QueuedWriter { agent_id });
+            }
+            tracing::info!(agent_id = %agent_id, position = queue.len(), "Write lock queued");
             Err(format!(
                 "Queued for write lock on '{}' (position: {})",
                 path,
@@ -141,16 +140,36 @@ impl FileLockManager {
         }
     }
 
-    /// Release all locks held by an agent.
-    /// When a write lock is released, the next writer in the queue is granted the lock.
+    /// Release all locks held by an agent and remove its pending write requests.
+    /// When a write lock is released, the next non-cancelled writer is granted the lock.
     pub fn release_all(&self, agent_id: Uuid) -> Vec<String> {
         let mut released_paths = Vec::new();
+
+        // A cancelled/failed waiter must not receive a lock later.
+        let queued_paths: Vec<String> = self
+            .write_queue
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        for path in queued_paths {
+            if let Some(mut queue) = self.write_queue.get_mut(&path) {
+                queue.retain(|writer| writer.agent_id != agent_id);
+                if queue.is_empty() {
+                    drop(queue);
+                    self.write_queue.remove(&path);
+                }
+            }
+        }
 
         // Iterate over all locked files
         let paths: Vec<String> = self.locks.iter().map(|entry| entry.key().clone()).collect();
 
         for path in &paths {
             if let Some(mut entry) = self.locks.get_mut(path) {
+                let had_lock = entry.iter().any(|lock| lock.agent_id == agent_id);
+                if !had_lock {
+                    continue;
+                }
                 let had_write = entry
                     .iter()
                     .any(|l| l.mode == LockMode::Write && l.agent_id == agent_id);
@@ -169,13 +188,8 @@ impl FileLockManager {
                                 path: path.clone(),
                                 mode: LockMode::Write,
                                 agent_id: next.agent_id,
-                                acquired_at: Instant::now(),
                             });
-                            tracing::info!(
-                                "[FILE_LOCK] Granted queued WRITE lock on '{}' to agent {}",
-                                path,
-                                next.agent_id
-                            );
+                            tracing::info!(agent_id = %next.agent_id, "Queued write lock granted");
                         }
                         if queue.is_empty() {
                             drop(queue);
@@ -186,11 +200,7 @@ impl FileLockManager {
 
                 released_paths.push(path.clone());
                 if had_write {
-                    tracing::info!(
-                        "[FILE_LOCK] Agent {} released WRITE lock on '{}'",
-                        agent_id,
-                        path
-                    );
+                    tracing::info!(agent_id = %agent_id, "Write lock released");
                 }
             }
         }
@@ -214,7 +224,6 @@ impl FileLockManager {
                             path: path.to_string(),
                             mode: LockMode::Write,
                             agent_id: next.agent_id,
-                            acquired_at: Instant::now(),
                         });
                     }
                     if queue.is_empty() {
@@ -281,6 +290,109 @@ pub struct FileLockSummary {
     pub total_locked_files: usize,
     pub write_locked_files: usize,
     pub queued_writers: usize,
+}
+
+/// A serializable snapshot of the entire file lock state.
+/// Used for persistence across restarts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LockSnapshot {
+    /// Held locks: path → (mode, agent_id)
+    pub held_locks: Vec<LockSnapshotEntry>,
+    /// Write queue: path → queued agents
+    pub write_queues: Vec<LockSnapshotQueue>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LockSnapshotEntry {
+    pub path: String,
+    pub mode: String, // "read" or "write"
+    pub agent_id: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LockSnapshotQueue {
+    pub path: String,
+    pub queued_agents: Vec<String>,
+}
+
+impl FileLockManager {
+    /// Take a snapshot of the current lock state.
+    pub fn snapshot(&self) -> LockSnapshot {
+        let held_locks: Vec<LockSnapshotEntry> = self
+            .locks
+            .iter()
+            .flat_map(|entry| {
+                let path = entry.key().clone();
+                // Collect into a Vec first to avoid borrow issues with DashMap iterators
+                let entries: Vec<LockSnapshotEntry> = entry
+                    .value()
+                    .iter()
+                    .map(|lock| LockSnapshotEntry {
+                        path: path.clone(),
+                        mode: match lock.mode {
+                            LockMode::Read => "read".to_string(),
+                            LockMode::Write => "write".to_string(),
+                        },
+                        agent_id: lock.agent_id.to_string(),
+                    })
+                    .collect();
+                entries
+            })
+            .collect();
+
+        let write_queues: Vec<LockSnapshotQueue> = self
+            .write_queue
+            .iter()
+            .map(|entry| LockSnapshotQueue {
+                path: entry.key().clone(),
+                queued_agents: entry
+                    .value()
+                    .iter()
+                    .map(|q| q.agent_id.to_string())
+                    .collect(),
+            })
+            .collect();
+
+        LockSnapshot {
+            held_locks,
+            write_queues,
+        }
+    }
+
+    /// Restore lock state from a snapshot. Existing locks are cleared first.
+    pub fn restore_from(&self, snapshot: &LockSnapshot) {
+        // Clear existing state
+        self.locks.clear();
+        self.write_queue.clear();
+
+        // Restore held locks (Note: these are reconstructed as-is;
+        // lock conflict checks happen naturally on re-acquisition)
+        for entry in &snapshot.held_locks {
+            if let Ok(agent_id) = Uuid::parse_str(&entry.agent_id) {
+                match entry.mode.as_str() {
+                    "write" => {
+                        let _ = self.acquire_write(&entry.path, agent_id);
+                    }
+                    _ => {
+                        let _ = self.acquire_read(&entry.path, agent_id);
+                    }
+                }
+            }
+        }
+
+        // Restore write queues
+        for queue in &snapshot.write_queues {
+            let mut deque: VecDeque<QueuedWriter> = VecDeque::new();
+            for agent_str in &queue.queued_agents {
+                if let Ok(agent_id) = Uuid::parse_str(agent_str) {
+                    deque.push_back(QueuedWriter { agent_id });
+                }
+            }
+            if !deque.is_empty() {
+                self.write_queue.insert(queue.path.clone(), deque);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -386,5 +498,77 @@ mod tests {
 
         // Now reader should be able to acquire
         assert!(mgr.acquire_read("test.txt", reader).is_ok());
+    }
+
+    #[test]
+    fn test_reacquiring_read_access_is_idempotent() {
+        let mgr = FileLockManager::new();
+        let agent = Uuid::new_v4();
+
+        mgr.acquire_read("read.txt", agent).unwrap();
+        mgr.acquire_read("read.txt", agent).unwrap();
+        assert_eq!(
+            mgr.snapshot()
+                .held_locks
+                .iter()
+                .filter(|lock| lock.path == "read.txt")
+                .count(),
+            1
+        );
+
+        mgr.acquire_write("write.txt", agent).unwrap();
+        mgr.acquire_read("write.txt", agent).unwrap();
+        assert_eq!(
+            mgr.snapshot()
+                .held_locks
+                .iter()
+                .filter(|lock| lock.path == "write.txt")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_reacquiring_granted_write_lock_is_idempotent() {
+        let mgr = FileLockManager::new();
+        let first = Uuid::new_v4();
+        let queued = Uuid::new_v4();
+
+        mgr.acquire_write("test.txt", first).unwrap();
+        assert!(mgr.acquire_write("test.txt", queued).is_err());
+        mgr.release_all(first);
+
+        assert!(mgr.acquire_write("test.txt", queued).is_ok());
+        assert_eq!(mgr.lock_holders("test.txt"), vec![queued]);
+        assert_eq!(mgr.queue_length("test.txt"), 0);
+    }
+
+    #[test]
+    fn test_repeated_write_attempt_does_not_duplicate_queue_entry() {
+        let mgr = FileLockManager::new();
+        let holder = Uuid::new_v4();
+        let queued = Uuid::new_v4();
+
+        mgr.acquire_write("test.txt", holder).unwrap();
+        assert!(mgr.acquire_write("test.txt", queued).is_err());
+        assert!(mgr.acquire_write("test.txt", queued).is_err());
+
+        assert_eq!(mgr.queue_length("test.txt"), 1);
+    }
+
+    #[test]
+    fn test_release_all_removes_waiting_writer() {
+        let mgr = FileLockManager::new();
+        let holder = Uuid::new_v4();
+        let cancelled = Uuid::new_v4();
+
+        mgr.acquire_write("test.txt", holder).unwrap();
+        assert!(mgr.acquire_write("test.txt", cancelled).is_err());
+        let released = mgr.release_all(cancelled);
+        assert!(released.is_empty());
+        assert_eq!(mgr.queue_length("test.txt"), 0);
+
+        mgr.release_all(holder);
+        assert!(!mgr.is_locked("test.txt"));
     }
 }
