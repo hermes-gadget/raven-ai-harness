@@ -71,8 +71,20 @@ impl FileLockManager {
     pub fn acquire_read(&self, path: &str, agent_id: Uuid) -> Result<(), String> {
         let mut entry = self.locks.entry(path.to_string()).or_default();
 
-        // Check if any write lock is held
-        if entry.iter().any(|l| l.mode == LockMode::Write) {
+        // A write lock held by this agent already grants read access, and
+        // repeated read acquisition must not create duplicate holders.
+        if entry
+            .iter()
+            .any(|lock| lock.agent_id == agent_id && lock.mode == LockMode::Write)
+            || entry
+                .iter()
+                .any(|lock| lock.agent_id == agent_id && lock.mode == LockMode::Read)
+        {
+            return Ok(());
+        }
+
+        // A different agent's write lock excludes readers.
+        if entry.iter().any(|lock| lock.mode == LockMode::Write) {
             return Err(format!(
                 "Cannot acquire read lock on '{}': write lock held",
                 path
@@ -95,6 +107,15 @@ impl FileLockManager {
     pub fn acquire_write(&self, path: &str, agent_id: Uuid) -> Result<(), String> {
         let mut entry = self.locks.entry(path.to_string()).or_default();
 
+        // Re-acquiring a lock that was granted from the queue is idempotent.
+        // Without this, a woken writer queues behind its own lock forever.
+        if entry
+            .iter()
+            .any(|lock| lock.mode == LockMode::Write && lock.agent_id == agent_id)
+        {
+            return Ok(());
+        }
+
         if entry.is_empty() {
             // No locks held — acquire immediately
             entry.push(FileLock {
@@ -105,9 +126,11 @@ impl FileLockManager {
             tracing::info!(agent_id = %agent_id, "Write lock acquired");
             Ok(())
         } else {
-            // Locks held — queue this writer
+            // Locks held — queue this writer once.
             let mut queue = self.write_queue.entry(path.to_string()).or_default();
-            queue.push_back(QueuedWriter { agent_id });
+            if !queue.iter().any(|writer| writer.agent_id == agent_id) {
+                queue.push_back(QueuedWriter { agent_id });
+            }
             tracing::info!(agent_id = %agent_id, position = queue.len(), "Write lock queued");
             Err(format!(
                 "Queued for write lock on '{}' (position: {})",
@@ -117,16 +140,36 @@ impl FileLockManager {
         }
     }
 
-    /// Release all locks held by an agent.
-    /// When a write lock is released, the next writer in the queue is granted the lock.
+    /// Release all locks held by an agent and remove its pending write requests.
+    /// When a write lock is released, the next non-cancelled writer is granted the lock.
     pub fn release_all(&self, agent_id: Uuid) -> Vec<String> {
         let mut released_paths = Vec::new();
+
+        // A cancelled/failed waiter must not receive a lock later.
+        let queued_paths: Vec<String> = self
+            .write_queue
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        for path in queued_paths {
+            if let Some(mut queue) = self.write_queue.get_mut(&path) {
+                queue.retain(|writer| writer.agent_id != agent_id);
+                if queue.is_empty() {
+                    drop(queue);
+                    self.write_queue.remove(&path);
+                }
+            }
+        }
 
         // Iterate over all locked files
         let paths: Vec<String> = self.locks.iter().map(|entry| entry.key().clone()).collect();
 
         for path in &paths {
             if let Some(mut entry) = self.locks.get_mut(path) {
+                let had_lock = entry.iter().any(|lock| lock.agent_id == agent_id);
+                if !had_lock {
+                    continue;
+                }
                 let had_write = entry
                     .iter()
                     .any(|l| l.mode == LockMode::Write && l.agent_id == agent_id);
@@ -455,5 +498,77 @@ mod tests {
 
         // Now reader should be able to acquire
         assert!(mgr.acquire_read("test.txt", reader).is_ok());
+    }
+
+    #[test]
+    fn test_reacquiring_read_access_is_idempotent() {
+        let mgr = FileLockManager::new();
+        let agent = Uuid::new_v4();
+
+        mgr.acquire_read("read.txt", agent).unwrap();
+        mgr.acquire_read("read.txt", agent).unwrap();
+        assert_eq!(
+            mgr.snapshot()
+                .held_locks
+                .iter()
+                .filter(|lock| lock.path == "read.txt")
+                .count(),
+            1
+        );
+
+        mgr.acquire_write("write.txt", agent).unwrap();
+        mgr.acquire_read("write.txt", agent).unwrap();
+        assert_eq!(
+            mgr.snapshot()
+                .held_locks
+                .iter()
+                .filter(|lock| lock.path == "write.txt")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_reacquiring_granted_write_lock_is_idempotent() {
+        let mgr = FileLockManager::new();
+        let first = Uuid::new_v4();
+        let queued = Uuid::new_v4();
+
+        mgr.acquire_write("test.txt", first).unwrap();
+        assert!(mgr.acquire_write("test.txt", queued).is_err());
+        mgr.release_all(first);
+
+        assert!(mgr.acquire_write("test.txt", queued).is_ok());
+        assert_eq!(mgr.lock_holders("test.txt"), vec![queued]);
+        assert_eq!(mgr.queue_length("test.txt"), 0);
+    }
+
+    #[test]
+    fn test_repeated_write_attempt_does_not_duplicate_queue_entry() {
+        let mgr = FileLockManager::new();
+        let holder = Uuid::new_v4();
+        let queued = Uuid::new_v4();
+
+        mgr.acquire_write("test.txt", holder).unwrap();
+        assert!(mgr.acquire_write("test.txt", queued).is_err());
+        assert!(mgr.acquire_write("test.txt", queued).is_err());
+
+        assert_eq!(mgr.queue_length("test.txt"), 1);
+    }
+
+    #[test]
+    fn test_release_all_removes_waiting_writer() {
+        let mgr = FileLockManager::new();
+        let holder = Uuid::new_v4();
+        let cancelled = Uuid::new_v4();
+
+        mgr.acquire_write("test.txt", holder).unwrap();
+        assert!(mgr.acquire_write("test.txt", cancelled).is_err());
+        let released = mgr.release_all(cancelled);
+        assert!(released.is_empty());
+        assert_eq!(mgr.queue_length("test.txt"), 0);
+
+        mgr.release_all(holder);
+        assert!(!mgr.is_locked("test.txt"));
     }
 }

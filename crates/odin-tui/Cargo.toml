@@ -26,4 +26,5 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow = "1"
 async-trait.workspace = true
+futures.workspace = true
 shellexpand = "3"

@@ -5,12 +5,15 @@
 //! persisting a static plan and asking the user to leave the TUI.
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::FutureExt;
 use odin_core::config::OdinConfig;
 use odin_core::traits::{AuditLogger, ChatStream, LoopEngine as _, Provider};
 use odin_core::types::{
@@ -105,6 +108,9 @@ pub enum RunnerEvent {
         priority: u32,
     },
     Error {
+        message: String,
+    },
+    FatalError {
         message: String,
     },
 }
@@ -280,7 +286,7 @@ pub async fn spawn_run(db_path: PathBuf, goal: String, max_iterations: u32) -> R
         let resources = match ExecutionResources::from_environment().await {
             Ok(resources) => resources,
             Err(error) => {
-                let _ = event_tx.send(RunnerEvent::Error {
+                let _ = event_tx.send(RunnerEvent::FatalError {
                     message: odin_permissions::SecretRedactor::full().redact(&format!(
                         "failed to initialize execution resources: {error}"
                     )),
@@ -301,7 +307,7 @@ pub async fn spawn_run(db_path: PathBuf, goal: String, max_iterations: u32) -> R
         )
         .await
         {
-            let _ = event_tx.send(RunnerEvent::Error {
+            let _ = event_tx.send(RunnerEvent::FatalError {
                 message: odin_permissions::SecretRedactor::full().redact(&error.to_string()),
             });
         }
@@ -479,42 +485,43 @@ async fn run_loop(
                         ).await?;
                     }
                     Err(error) => {
-                        // Nested spawn in spawn_agent_execution converts panics into
-                        // AgentExecution results. A JoinError here means the outer
-                        // wrapper itself failed; fail any still-unfinished spawned agents
-                        // once the set is drained so the run cannot hang forever.
+                        // The agent body catches panics itself. Any JoinError here
+                        // means the outer wrapper failed, so abort and terminalize
+                        // every in-flight agent before scheduling more work.
+                        let message = format!("sub-agent join failed: {error}");
                         let _ = event_tx.send(RunnerEvent::Error {
-                            message: format!("sub-agent join failed: {error}"),
+                            message: message.clone(),
                         });
-                        if join_set.is_empty() {
-                            let stuck: Vec<_> = exec_agents
-                                .iter()
-                                .filter(|agent| {
-                                    spawned.contains(&agent.agent_id)
-                                        && !terminal.contains(&agent.agent_id)
-                                })
-                                .cloned()
-                                .collect();
-                            for agent in stuck {
-                                let execution = AgentExecution {
-                                    agent_id: agent.agent_id,
-                                    label: agent.label.clone(),
-                                    write_files: agent.write_files.clone(),
-                                    result: Err(odin_core::error::OdinError::Internal(format!(
-                                        "sub-agent join failed: {error}"
-                                    ))),
-                                    elapsed: Duration::ZERO,
-                                };
-                                finish_agent_execution(
-                                    &store,
-                                    &mut composer,
-                                    &goal_key,
-                                    &execution,
-                                    &mut terminal,
-                                    &event_tx,
-                                )
-                                .await?;
-                            }
+                        join_set.abort_all();
+                        while join_set.join_next().await.is_some() {}
+
+                        let stuck: Vec<_> = exec_agents
+                            .iter()
+                            .filter(|agent| {
+                                spawned.contains(&agent.agent_id)
+                                    && !terminal.contains(&agent.agent_id)
+                            })
+                            .cloned()
+                            .collect();
+                        for agent in stuck {
+                            let execution = AgentExecution {
+                                agent_id: agent.agent_id,
+                                label: agent.label.clone(),
+                                write_files: agent.write_files.clone(),
+                                result: Err(odin_core::error::OdinError::Internal(
+                                    message.clone(),
+                                )),
+                                elapsed: Duration::ZERO,
+                            };
+                            finish_agent_execution(
+                                &store,
+                                &mut composer,
+                                &goal_key,
+                                &execution,
+                                &mut terminal,
+                                &event_tx,
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -711,79 +718,79 @@ async fn start_ready_agents(
     ordered.sort_by_key(|agent| (agent.priority, agent.label.clone()));
 
     for agent in ordered {
-        let phase = composer
+        let (phase, lifecycle_before) = composer
             .get_agent(&agent.agent_id)
-            .map(|(_, lifecycle)| lifecycle.phase)
-            .unwrap_or(AgentPhase::Cancelled);
+            .map(|(_, lifecycle)| {
+                (
+                    lifecycle.phase,
+                    (lifecycle.phase_changed_at, lifecycle.held_locks.clone()),
+                )
+            })
+            .unwrap_or((AgentPhase::Cancelled, (chrono::Utc::now(), Vec::new())));
 
         match phase {
-            AgentPhase::Queued => match composer.start_agent(agent.agent_id) {
-                Ok(()) => {
-                    spawn_agent_execution(
-                        agent.clone(),
-                        max_iterations,
-                        resources.clone(),
-                        spawned,
-                        join_set,
-                        event_tx.clone(),
-                    );
-                    if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
-                        store.save_agent_lifecycle(lifecycle).await?;
+            AgentPhase::Queued | AgentPhase::WaitingForLock => {
+                match composer.start_agent(agent.agent_id) {
+                    Ok(()) => {
+                        spawn_agent_execution(
+                            agent.clone(),
+                            max_iterations,
+                            resources.clone(),
+                            spawned,
+                            join_set,
+                            event_tx.clone(),
+                        );
+                        if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
+                            store.save_agent_lifecycle(lifecycle).await?;
+                        }
+                        persist_graph(store, composer, goal_key, Some(TaskGraphStatus::Running))
+                            .await?;
+                        persist_locks(store, composer).await?;
+                        let _ = event_tx.send(RunnerEvent::AgentStarted {
+                            agent_id: agent.agent_id.to_string(),
+                            label: agent.label.clone(),
+                            task: agent.goal.clone(),
+                        });
                     }
-                    persist_graph(store, composer, goal_key, Some(TaskGraphStatus::Running))
-                        .await?;
-                    persist_locks(store, composer).await?;
-                    let _ = event_tx.send(RunnerEvent::AgentStarted {
-                        agent_id: agent.agent_id.to_string(),
-                        label: agent.label.clone(),
-                        task: agent.goal.clone(),
-                    });
-                }
-                Err(reason) => {
-                    if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
-                        store.save_agent_lifecycle(lifecycle).await?;
+                    Err(reason) => {
+                        // Retry frequently, but persist only genuine state changes
+                        // and announce only the initial transition into waiting.
+                        let lifecycle_changed = composer
+                            .get_agent(&agent.agent_id)
+                            .map(|(_, lifecycle)| {
+                                (lifecycle.phase_changed_at, lifecycle.held_locks.clone())
+                                    != lifecycle_before
+                            })
+                            .unwrap_or(false);
+                        if phase != AgentPhase::WaitingForLock || lifecycle_changed {
+                            if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
+                                store.save_agent_lifecycle(lifecycle).await?;
+                            }
+                            persist_graph(
+                                store,
+                                composer,
+                                goal_key,
+                                Some(TaskGraphStatus::Running),
+                            )
+                            .await?;
+                            persist_locks(store, composer).await?;
+                        }
+                        if phase != AgentPhase::WaitingForLock {
+                            let _ = event_tx.send(RunnerEvent::AgentQueued {
+                                agent_id: agent.agent_id.to_string(),
+                                label: agent.label.clone(),
+                                reason,
+                            });
+                            let _ = event_tx.send(RunnerEvent::AgentStage {
+                                agent_id: agent.agent_id.to_string(),
+                                label: agent.label.clone(),
+                                stage: AgentStage::WaitingForLock,
+                                detail: "waiting for file lock or dependency".into(),
+                                elapsed_ms: 0,
+                            });
+                        }
                     }
-                    persist_graph(store, composer, goal_key, Some(TaskGraphStatus::Running))
-                        .await?;
-                    persist_locks(store, composer).await?;
-                    let _ = event_tx.send(RunnerEvent::AgentQueued {
-                        agent_id: agent.agent_id.to_string(),
-                        label: agent.label.clone(),
-                        reason,
-                    });
-                    let _ = event_tx.send(RunnerEvent::AgentStage {
-                        agent_id: agent.agent_id.to_string(),
-                        label: agent.label.clone(),
-                        stage: AgentStage::WaitingForLock,
-                        detail: "waiting for file lock or dependency".into(),
-                        elapsed_ms: 0,
-                    });
                 }
-            },
-            AgentPhase::WaitingForLock if has_granted_write_locks(composer, agent) => {
-                if let Some((sub_agent, lifecycle)) = composer.get_agent_mut(&agent.agent_id) {
-                    sub_agent.phase = AgentPhase::Running;
-                    lifecycle.start();
-                }
-                composer.update_node_status(goal_key, agent.node_id, TaskNodeStatus::Running);
-                spawn_agent_execution(
-                    agent.clone(),
-                    max_iterations,
-                    resources.clone(),
-                    spawned,
-                    join_set,
-                    event_tx.clone(),
-                );
-                if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
-                    store.save_agent_lifecycle(lifecycle).await?;
-                }
-                persist_graph(store, composer, goal_key, Some(TaskGraphStatus::Running)).await?;
-                persist_locks(store, composer).await?;
-                let _ = event_tx.send(RunnerEvent::AgentStarted {
-                    agent_id: agent.agent_id.to_string(),
-                    label: agent.label.clone(),
-                    task: agent.goal.clone(),
-                });
             }
             _ => {}
         }
@@ -792,14 +799,16 @@ async fn start_ready_agents(
     Ok(())
 }
 
-fn has_granted_write_locks(composer: &Composer, agent: &ExecAgent) -> bool {
-    agent.write_files.is_empty()
-        || agent.write_files.iter().all(|path| {
-            composer
-                .file_locks()
-                .lock_holders(path)
-                .contains(&agent.agent_id)
-        })
+async fn catch_agent_panic<F, T>(future: F) -> odin_core::error::OdinResult<T>
+where
+    F: Future<Output = odin_core::error::OdinResult<T>>,
+{
+    match AssertUnwindSafe(future).catch_unwind().await {
+        Ok(result) => result,
+        Err(_) => Err(odin_core::error::OdinError::Internal(
+            "sub-agent task panicked".into(),
+        )),
+    }
 }
 
 fn spawn_agent_execution(
@@ -817,9 +826,9 @@ fn spawn_agent_execution(
         let label = agent.label.clone();
         let write_files = agent.write_files.clone();
 
-        // Nested task so a panic becomes a failed AgentExecution with id, not a
-        // JoinError that can leave the outer run loop hung forever.
-        let inner = tokio::spawn(async move {
+        // Catch panics in the same future so aborting the outer JoinSet task
+        // still drops provider/tool work immediately.
+        let result = catch_agent_panic(async move {
             let _ = event_tx.send(RunnerEvent::AgentStage {
                 agent_id: agent.agent_id.to_string(),
                 label: agent.label.clone(),
@@ -865,15 +874,13 @@ fn spawn_agent_execution(
                 engine = engine.with_policy_engine(policy_engine);
             }
             if let Some(registry) = resources.tool_registry.clone() {
-                let registry = if agent.allowed_tools.is_empty() {
-                    registry
-                } else {
-                    registry
-                        .scoped(&agent.allowed_tools)
-                        .map(Arc::new)
-                        .unwrap_or(registry)
-                };
-                engine = engine.with_tool_registry(registry);
+                let scoped = registry.scoped(&agent.allowed_tools).map_err(|error| {
+                    odin_core::error::OdinError::Validation(format!(
+                        "invalid tool scope for agent '{}': {error}",
+                        agent.label
+                    ))
+                })?;
+                engine = engine.with_tool_registry(Arc::new(scoped));
             }
             if let Some(audit_logger) = resources.audit_logger.clone() {
                 engine = engine.with_audit_logger(Arc::new(ProgressAuditLogger::new(
@@ -902,14 +909,8 @@ fn spawn_agent_execution(
                 elapsed_ms,
             });
             result
-        });
-
-        let result = match inner.await {
-            Ok(result) => result,
-            Err(error) => Err(odin_core::error::OdinError::Internal(format!(
-                "sub-agent task failed: {error}"
-            ))),
-        };
+        })
+        .await;
         AgentExecution {
             agent_id,
             label,
@@ -1417,5 +1418,53 @@ async fn load_mcp_tools(registry: &odin_tools::ToolRegistry, config: &OdinConfig
                 tracing::warn!("[TUI/MCP] Failed to register tool '{}': {}", name, error);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_panic_is_converted_to_internal_error() {
+        let result: odin_core::error::OdinResult<()> = catch_agent_panic(async {
+            panic!("agent panic");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(odin_core::error::OdinError::Internal(message))
+                if message.contains("panicked")
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_aborting_agent_wrapper_drops_in_flight_work() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let dropped_in_task = dropped.clone();
+
+        let handle = tokio::spawn(catch_agent_panic(async move {
+            let _drop_flag = DropFlag(dropped_in_task);
+            let _ = started_tx.send(());
+            std::future::pending::<odin_core::error::OdinResult<()>>().await
+        }));
+
+        started_rx.await.unwrap();
+        handle.abort();
+        assert!(handle.await.unwrap_err().is_cancelled());
+        assert!(dropped.load(Ordering::SeqCst));
     }
 }

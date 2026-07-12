@@ -7,6 +7,7 @@
 //!   raven serve [--addr]       — Start the HTTP API server
 //!   raven --help               — Show the complete command list
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -21,6 +22,81 @@ use tracing_subscriber::EnvFilter;
 
 // Scheduler types
 use odin_scheduler::{JobId, Scheduler, SchedulerJobConfig, SqliteSchedulerStore};
+
+type AgentTaskOutput = (
+    uuid::Uuid,
+    String,
+    odin_core::error::OdinResult<odin_core::types::TaskResult>,
+    std::time::Duration,
+);
+
+/// Tracks orchestration tasks by agent and yields them in completion order.
+/// Dropping this set aborts every remaining task, preventing detached work on errors.
+struct AgentTaskSet {
+    tasks: tokio::task::JoinSet<AgentTaskOutput>,
+    agents_by_task: std::collections::HashMap<tokio::task::Id, uuid::Uuid>,
+}
+
+impl AgentTaskSet {
+    fn new() -> Self {
+        Self {
+            tasks: tokio::task::JoinSet::new(),
+            agents_by_task: std::collections::HashMap::new(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    fn spawn<F>(&mut self, agent_id: uuid::Uuid, future: F)
+    where
+        F: Future<Output = AgentTaskOutput> + Send + 'static,
+    {
+        let handle = self.tasks.spawn(future);
+        self.agents_by_task.insert(handle.id(), agent_id);
+    }
+
+    async fn join_next(
+        &mut self,
+    ) -> Option<(uuid::Uuid, Result<AgentTaskOutput, tokio::task::JoinError>)> {
+        let joined = self.tasks.join_next_with_id().await?;
+        match joined {
+            Ok((task_id, output)) => {
+                let agent_id = self
+                    .agents_by_task
+                    .remove(&task_id)
+                    .expect("completed orchestration task must be tracked");
+                debug_assert_eq!(agent_id, output.0);
+                Some((agent_id, Ok(output)))
+            }
+            Err(error) => {
+                let agent_id = self
+                    .agents_by_task
+                    .remove(&error.id())
+                    .expect("failed orchestration task must be tracked");
+                Some((agent_id, Err(error)))
+            }
+        }
+    }
+}
+
+async fn persist_orchestration_state(
+    store: &odin_orchestrator::persistence::SqliteOrchestrationStore,
+    composer: &Composer,
+    root_goal: &str,
+    agent_id: uuid::Uuid,
+) -> anyhow::Result<()> {
+    if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
+        store.save_agent_lifecycle(lifecycle).await?;
+    }
+    if let Some(graph) = composer.get_graph(root_goal) {
+        store.save_task_graph(graph).await?;
+    }
+    let lock_snapshot = serde_json::to_string(&composer.file_locks().snapshot())?;
+    store.save_lock_snapshot(&lock_snapshot).await?;
+    Ok(())
+}
 
 // ── CLI Definition ───────────────────────────────────────────────────
 
@@ -788,7 +864,7 @@ async fn run_orchestrated(
         }
     }
 
-    let mut agent_handles = Vec::new();
+    let mut agent_handles = AgentTaskSet::new();
     let mut spawned = std::collections::HashSet::<uuid::Uuid>::new();
     let mut terminal = std::collections::HashSet::<uuid::Uuid>::new();
     let max_retries = 1u32;
@@ -811,6 +887,20 @@ async fn run_orchestrated(
         ordered.sort_by_key(|agent| (agent.priority, agent.label.clone()));
 
         for agent in ordered {
+            let scoped_registry = match tool_registry.scoped(&agent.allowed_tools) {
+                Ok(registry) => Arc::new(registry),
+                Err(error) => {
+                    composer.fail_agent(
+                        agent.agent_id,
+                        format!("Invalid tool scope for agent '{}': {error}", agent.label),
+                    );
+                    terminal.insert(agent.agent_id);
+                    persist_orchestration_state(&store, &composer, &root_goal, agent.agent_id)
+                        .await?;
+                    continue;
+                }
+            };
+
             match composer.start_agent(agent.agent_id) {
                 Ok(()) => {
                     tracing::info!("[ORCH] Agent '{}' started", agent.label);
@@ -825,20 +915,6 @@ async fn run_orchestrated(
                     let lock_snapshot = serde_json::to_string(&composer.file_locks().snapshot())?;
                     store.save_lock_snapshot(&lock_snapshot).await?;
 
-                    let scoped_registry =
-                        if agent.allowed_tools.is_empty() {
-                            tool_registry.clone()
-                        } else {
-                            Arc::new(tool_registry.scoped(&agent.allowed_tools).map_err(
-                                |error| {
-                                    anyhow::anyhow!(
-                                        "Failed to scope tools for agent '{}': {error}",
-                                        agent.label
-                                    )
-                                },
-                            )?)
-                        };
-
                     let provider = provider.clone();
                     let policy_engine = policy_engine.clone();
                     let audit_logger = audit_logger.clone();
@@ -847,7 +923,7 @@ async fn run_orchestrated(
                     let model_name = model_name.clone();
                     let agent_id = agent.agent_id;
 
-                    let handle = tokio::spawn(async move {
+                    agent_handles.spawn(agent.agent_id, async move {
                         let mut final_result = Err(odin_core::error::OdinError::Internal(
                             "Agent did not execute".into(),
                         ));
@@ -901,7 +977,6 @@ async fn run_orchestrated(
 
                         (agent_id, label_for_result, final_result, total_elapsed)
                     });
-                    agent_handles.push((agent.agent_id, handle));
                 }
                 Err(msg) => {
                     tracing::info!("[ORCH] Agent '{}' queued: {}", agent.label, msg);
@@ -932,137 +1007,60 @@ async fn run_orchestrated(
                     "Could not acquire file locks and no running agents hold them",
                 );
                 terminal.insert(agent_id);
-                if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
-                    store.save_agent_lifecycle(lifecycle).await?;
-                }
-            }
-            if let Some(graph) = composer.get_graph(&root_goal) {
-                store.save_task_graph(graph).await?;
+                persist_orchestration_state(&store, &composer, &root_goal, agent_id).await?;
             }
             break;
         }
 
-        // Wait for at least one agent to finish so locks can free.
-        let (spawned_agent_id, handle) = agent_handles.remove(0);
-        match handle.await {
-            Ok((agent_id, label, result, elapsed)) => match result {
-                Ok(task_result) => {
-                    println!(
-                        "  {} {} — {} ({}ms, {} iters)",
-                        if task_result.success { "✅" } else { "⚠️" },
-                        label,
-                        if task_result.success {
-                            "success"
-                        } else {
-                            "failed"
-                        },
-                        elapsed.as_millis(),
-                        task_result.iterations,
-                    );
-                    composer.complete_agent(
-                        agent_id,
-                        SubAgentResult {
+        // Process whichever agent finishes first so its locks are released promptly.
+        let (spawned_agent_id, completion) = agent_handles
+            .join_next()
+            .await
+            .expect("non-empty orchestration task set must yield a completion");
+        match completion {
+            Ok((agent_id, label, result, elapsed)) => {
+                match result {
+                    Ok(task_result) => {
+                        println!(
+                            "  {} {} — {} ({}ms, {} iters)",
+                            if task_result.success { "✅" } else { "⚠️" },
+                            label,
+                            if task_result.success {
+                                "success"
+                            } else {
+                                "failed"
+                            },
+                            elapsed.as_millis(),
+                            task_result.iterations,
+                        );
+                        composer.complete_agent(
                             agent_id,
-                            name: label.clone(),
-                            summary: task_result.summary.clone(),
-                            output: Some(task_result.summary),
-                            modified_files: vec![],
-                            success: task_result.success,
-                            error: task_result.error.clone(),
-                            duration_ms: elapsed.as_millis() as u64,
-                        },
-                    );
-                    terminal.insert(agent_id);
-                    if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
-                        store.save_agent_lifecycle(lifecycle).await?;
+                            SubAgentResult {
+                                agent_id,
+                                name: label,
+                                summary: task_result.summary.clone(),
+                                output: Some(task_result.summary),
+                                modified_files: vec![],
+                                success: task_result.success,
+                                error: task_result.error,
+                                duration_ms: elapsed.as_millis() as u64,
+                            },
+                        );
                     }
-                    if let Some(graph) = composer.get_graph(&root_goal) {
-                        store.save_task_graph(graph).await?;
-                    }
-                }
-                Err(e) => {
-                    println!("  ❌ {} — error: {}", label, e);
-                    composer.fail_agent(agent_id, e.to_string());
-                    terminal.insert(agent_id);
-                    if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
-                        store.save_agent_lifecycle(lifecycle).await?;
-                    }
-                    if let Some(graph) = composer.get_graph(&root_goal) {
-                        store.save_task_graph(graph).await?;
+                    Err(error) => {
+                        println!("  ❌ {} — error: {}", label, error);
+                        composer.fail_agent(agent_id, error.to_string());
                     }
                 }
-            },
-            Err(e) => {
-                tracing::error!("[ORCH] Sub-agent panicked: {}", e);
-                composer.fail_agent(spawned_agent_id, format!("Sub-agent task failed: {e}"));
-                terminal.insert(spawned_agent_id);
-                if let Some((_, lifecycle)) = composer.get_agent(&spawned_agent_id) {
-                    store.save_agent_lifecycle(lifecycle).await?;
-                }
-                if let Some(graph) = composer.get_graph(&root_goal) {
-                    store.save_task_graph(graph).await?;
-                }
+                terminal.insert(agent_id);
+                persist_orchestration_state(&store, &composer, &root_goal, agent_id).await?;
             }
-        }
-    }
-
-    // Drain any remaining in-flight handles.
-    for (spawned_agent_id, handle) in agent_handles {
-        match handle.await {
-            Ok((agent_id, label, result, elapsed)) => match result {
-                Ok(task_result) => {
-                    println!(
-                        "  {} {} — {} ({}ms, {} iters)",
-                        if task_result.success { "✅" } else { "⚠️" },
-                        label,
-                        if task_result.success {
-                            "success"
-                        } else {
-                            "failed"
-                        },
-                        elapsed.as_millis(),
-                        task_result.iterations,
-                    );
-                    composer.complete_agent(
-                        agent_id,
-                        SubAgentResult {
-                            agent_id,
-                            name: label.clone(),
-                            summary: task_result.summary.clone(),
-                            output: Some(task_result.summary),
-                            modified_files: vec![],
-                            success: task_result.success,
-                            error: task_result.error.clone(),
-                            duration_ms: elapsed.as_millis() as u64,
-                        },
-                    );
-                    if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
-                        store.save_agent_lifecycle(lifecycle).await?;
-                    }
-                    if let Some(graph) = composer.get_graph(&root_goal) {
-                        store.save_task_graph(graph).await?;
-                    }
-                }
-                Err(e) => {
-                    println!("  ❌ {} — error: {}", label, e);
-                    composer.fail_agent(agent_id, e.to_string());
-                    if let Some((_, lifecycle)) = composer.get_agent(&agent_id) {
-                        store.save_agent_lifecycle(lifecycle).await?;
-                    }
-                    if let Some(graph) = composer.get_graph(&root_goal) {
-                        store.save_task_graph(graph).await?;
-                    }
-                }
-            },
-            Err(e) => {
-                tracing::error!("[ORCH] Sub-agent panicked: {}", e);
-                composer.fail_agent(spawned_agent_id, format!("Sub-agent task failed: {e}"));
-                if let Some((_, lifecycle)) = composer.get_agent(&spawned_agent_id) {
-                    store.save_agent_lifecycle(lifecycle).await?;
-                }
-                if let Some(graph) = composer.get_graph(&root_goal) {
-                    store.save_task_graph(graph).await?;
-                }
+            Err(error) => {
+                tracing::error!("[ORCH] Sub-agent task failed: {}", error);
+                composer.fail_agent(spawned_agent_id, format!("Sub-agent task failed: {error}"));
+                terminal.insert(spawned_agent_id);
+                persist_orchestration_state(&store, &composer, &root_goal, spawned_agent_id)
+                    .await?;
             }
         }
     }
@@ -3192,9 +3190,40 @@ fn build_profile() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::AgentTaskSet;
     use super::Cli;
     use super::Commands;
     use clap::Parser;
+
+    #[tokio::test]
+    async fn test_agent_task_set_yields_first_completed_agent() {
+        let mut tasks = AgentTaskSet::new();
+        let slow_id = uuid::Uuid::new_v4();
+        let fast_id = uuid::Uuid::new_v4();
+
+        tasks.spawn(slow_id, async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            (
+                slow_id,
+                "slow".to_string(),
+                Err(odin_core::error::OdinError::Internal("slow".into())),
+                std::time::Duration::from_millis(50),
+            )
+        });
+        tasks.spawn(fast_id, async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            (
+                fast_id,
+                "fast".to_string(),
+                Err(odin_core::error::OdinError::Internal("fast".into())),
+                std::time::Duration::from_millis(1),
+            )
+        });
+
+        let (completed_id, result) = tasks.join_next().await.unwrap();
+        assert_eq!(completed_id, fast_id);
+        assert!(result.is_ok());
+    }
 
     #[test]
     fn test_cli_parses_run_command() {

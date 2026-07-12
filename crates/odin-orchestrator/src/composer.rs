@@ -467,20 +467,40 @@ impl Composer {
 
     /// Start a sub-agent (transition from Queued to Running).
     pub fn start_agent(&mut self, id: Uuid) -> Result<(), String> {
+        let file_locks = self.file_locks.clone();
+        let agent_id = id.to_string();
+        let held_before: std::collections::HashSet<String> = file_locks
+            .snapshot()
+            .held_locks
+            .into_iter()
+            .filter(|lock| lock.agent_id == agent_id)
+            .map(|lock| lock.path)
+            .collect();
+        let rollback_new_locks = |lifecycle: &mut AgentLifecycle| {
+            for path in lifecycle.held_locks.clone() {
+                if !held_before.contains(&path) {
+                    file_locks.release(&path, id);
+                    lifecycle.lock_released(&path);
+                }
+            }
+        };
+
         let task_node_id = {
             let (agent, lifecycle) = self
                 .agents
                 .get_mut(&id)
                 .ok_or_else(|| format!("Agent {} not found", id))?;
 
-            // Acquire file locks if needed
+            // Acquire file locks if needed. If any acquisition fails, roll
+            // back only locks added by this attempt and preserve FIFO grants.
             if agent.needs_write_locks() {
                 for file in &agent.config.write_files {
-                    match self.file_locks.acquire_write(file, id) {
+                    match file_locks.acquire_write(file, id) {
                         Ok(()) => {
                             lifecycle.lock_acquired(file);
                         }
                         Err(msg) => {
+                            rollback_new_locks(lifecycle);
                             lifecycle.wait_for_lock(file);
                             return Err(msg);
                         }
@@ -488,9 +508,19 @@ impl Composer {
                 }
             }
 
-            // Acquire read locks for files we just read
+            // A write lock already grants read access for the same path.
             for file in &agent.config.read_files {
-                let _ = self.file_locks.acquire_read(file, id);
+                if agent.config.write_files.contains(file) {
+                    continue;
+                }
+                match file_locks.acquire_read(file, id) {
+                    Ok(()) => lifecycle.lock_acquired(file),
+                    Err(msg) => {
+                        rollback_new_locks(lifecycle);
+                        lifecycle.wait_for_lock(file);
+                        return Err(msg);
+                    }
+                }
             }
 
             agent.phase = AgentPhase::Running;
@@ -504,9 +534,19 @@ impl Composer {
     /// Complete a sub-agent.
     pub fn complete_agent(&mut self, id: Uuid, result: SubAgentResult) {
         let task_node_id = if let Some((agent, lifecycle)) = self.agents.get_mut(&id) {
-            agent.phase = AgentPhase::Done;
             agent.result = Some(result.summary.clone());
-            lifecycle.complete();
+            if result.success {
+                agent.phase = AgentPhase::Done;
+                lifecycle.complete();
+            } else {
+                let error = result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| result.summary.clone());
+                agent.phase = AgentPhase::Failed;
+                agent.error = Some(error.clone());
+                lifecycle.fail(error);
+            }
 
             // Release all file locks
             self.file_locks.release_all(id);
@@ -879,42 +919,72 @@ impl Composer {
 /// Default capability tags for heuristic (non-LLM) task nodes.
 pub fn default_capabilities_for_goal(goal: &str) -> Vec<String> {
     let lower = goal.to_ascii_lowercase();
+    let mut words: std::collections::HashSet<String> = lower
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .filter(|word| !word.is_empty())
+        .map(str::to_string)
+        .collect();
+    // Normalize common English inflections without falling back to unsafe
+    // substring matching (for example, `prefix` must not imply `fix`).
+    for word in words.clone() {
+        for suffix in ["ing", "ed", "es", "s"] {
+            if let Some(stem) = word.strip_suffix(suffix).filter(|stem| stem.len() >= 3) {
+                words.insert(stem.to_string());
+                if matches!(suffix, "ing" | "ed") {
+                    words.insert(format!("{stem}e"));
+                    let mut reversed = stem.chars().rev();
+                    if let (Some(last), Some(previous)) = (reversed.next(), reversed.next())
+                        && last == previous
+                    {
+                        let shortened = &stem[..stem.len() - last.len_utf8()];
+                        words.insert(shortened.to_string());
+                    }
+                }
+            }
+        }
+    }
+    let has_any = |candidates: &[&str]| candidates.iter().any(|word| words.contains(*word));
+
     let mut caps = vec!["read".to_string(), "filesystem".to_string()];
-    if lower.contains("write")
-        || lower.contains("edit")
-        || lower.contains("fix")
-        || lower.contains("create")
-        || lower.contains("update")
-        || lower.contains("refactor")
-        || lower.contains("implement")
-    {
+    if has_any(&[
+        "write",
+        "edit",
+        "fix",
+        "create",
+        "update",
+        "refactor",
+        "implement",
+        "add",
+        "remove",
+        "delete",
+        "rename",
+        "replace",
+        "change",
+        "modify",
+        "move",
+        "changes",
+        "edits",
+        "updates",
+        "fixes",
+        "improve",
+    ]) {
         caps.push("write".to_string());
     }
-    if lower.contains("shell")
-        || lower.contains("command")
-        || lower.contains("run ")
-        || lower.contains("test")
-        || lower.contains("build")
-    {
+    if has_any(&[
+        "shell", "command", "commands", "run", "test", "tests", "build", "builds",
+    ]) {
         caps.push("shell".to_string());
     }
-    if lower.contains("git") || lower.contains("commit") || lower.contains("branch") {
+    if has_any(&["git", "commit", "commits", "branch", "branches"]) {
         caps.push("git".to_string());
     }
-    if lower.contains("http")
-        || lower.contains("web")
-        || lower.contains("fetch")
-        || lower.contains("url")
-        || lower.contains("search")
-    {
+    if has_any(&[
+        "http", "https", "web", "fetch", "url", "urls", "search", "searches",
+    ]) {
         caps.push("web".to_string());
     }
-    if lower.contains("github") || lower.contains("pull request") || lower.contains("issue") {
+    if has_any(&["github", "issue", "issues"]) || lower.contains("pull request") {
         caps.push("github".to_string());
-    }
-    // Safe default toolkit for generic goals so agents can inspect and act.
-    if caps.len() == 2 {
-        caps.extend(["write".into(), "shell".into(), "git".into()]);
     }
     caps.sort();
     caps.dedup();
@@ -939,10 +1009,6 @@ pub fn capabilities_to_tools(capabilities: &[String]) -> Vec<String> {
                         "text_search",
                         "json_extract",
                         "json_validate",
-                        "disk_usage",
-                        "system_info",
-                        "time_now",
-                        "env_var",
                     ]
                     .map(str::to_string),
                 );
@@ -970,12 +1036,9 @@ pub fn capabilities_to_tools(capabilities: &[String]) -> Vec<String> {
                 );
             }
             "safe" => tools.extend(default_agent_tools()),
-            other => {
-                // Allow explicit tool names passed as capabilities.
-                if !other.is_empty() {
-                    tools.push(other.to_string());
-                }
-            }
+            // Capability strings may be model-generated. Unknown values must
+            // never be interpreted as concrete tool names.
+            _ => {}
         }
     }
     tools.sort();
@@ -993,17 +1056,10 @@ pub fn default_agent_tools() -> Vec<String> {
         "file_read",
         "file_list",
         "file_exists",
-        "file_write",
         "text_search",
-        "shell",
-        "git",
-        "web_fetch",
-        "web_search",
-        "system_info",
         "json_extract",
         "json_validate",
         "time_now",
-        "env_var",
     ]
     .into_iter()
     .map(str::to_string)
@@ -1071,7 +1127,61 @@ mod tests {
     fn test_capabilities_to_tools_default_and_mapping() {
         let defaults = capabilities_to_tools(&[]);
         assert!(defaults.contains(&"file_read".to_string()));
-        assert!(!defaults.contains(&"github_issue_create".to_string()));
+        for privileged in [
+            "file_write",
+            "file_delete",
+            "shell",
+            "git",
+            "web_fetch",
+            "web_search",
+            "env_var",
+        ] {
+            assert!(
+                !defaults.contains(&privileged.to_string()),
+                "default scope must not grant {privileged}"
+            );
+        }
+
+        let generic = default_capabilities_for_goal("summarize the README");
+        let generic_tools = capabilities_to_tools(&generic);
+        assert!(!generic_tools.contains(&"shell".to_string()));
+        assert!(!generic_tools.contains(&"file_write".to_string()));
+        assert!(!generic_tools.contains(&"git".to_string()));
+
+        for mutation in [
+            "add a test",
+            "remove dead code",
+            "delete a file",
+            "rename a symbol",
+            "replace the parser",
+            "modify configuration",
+            "improve docs",
+            "fixing the parser",
+            "implementing auth",
+        ] {
+            assert!(
+                default_capabilities_for_goal(mutation).contains(&"write".to_string()),
+                "mutation goal should receive write capability: {mutation}"
+            );
+        }
+        assert!(
+            default_capabilities_for_goal("create regression tests").contains(&"shell".to_string()),
+            "plural test goals should receive shell capability"
+        );
+        for git_goal in ["committing the current work", "committed the result"] {
+            assert!(
+                default_capabilities_for_goal(git_goal).contains(&"git".to_string()),
+                "git inflection should receive git capability: {git_goal}"
+            );
+        }
+
+        let substring_traps = default_capabilities_for_goal("summarize latest legitimate prefix");
+        assert!(!substring_traps.contains(&"shell".to_string()));
+        assert!(!substring_traps.contains(&"write".to_string()));
+        assert!(!substring_traps.contains(&"git".to_string()));
+
+        let unknown = capabilities_to_tools(&["rust".into(), "testing".into()]);
+        assert_eq!(unknown, defaults, "unknown capabilities must fail closed");
 
         let shell = capabilities_to_tools(&["shell".into()]);
         assert!(shell.contains(&"shell".to_string()));
@@ -1134,6 +1244,33 @@ mod tests {
         };
         composer.complete_agent(id, result);
         assert_eq!(composer.get_agent(&id).unwrap().1.phase, AgentPhase::Done);
+    }
+
+    #[test]
+    fn test_unsuccessful_completion_marks_agent_failed() {
+        let mut composer = Composer::default();
+        let config = SubAgentConfigBuilder::new("test", "do work").build();
+        let id = composer.register_agent(config);
+        composer.start_agent(id).unwrap();
+
+        composer.complete_agent(
+            id,
+            SubAgentResult {
+                agent_id: id,
+                name: "test".into(),
+                summary: "verification failed".into(),
+                output: None,
+                modified_files: vec![],
+                success: false,
+                error: Some("tests failed".into()),
+                duration_ms: 100,
+            },
+        );
+
+        let (agent, lifecycle) = composer.get_agent(&id).unwrap();
+        assert_eq!(agent.phase, AgentPhase::Failed);
+        assert_eq!(lifecycle.phase, AgentPhase::Failed);
+        assert_eq!(agent.error.as_deref(), Some("tests failed"));
     }
 
     #[test]
@@ -1243,6 +1380,138 @@ mod tests {
         );
 
         assert!(composer.file_locks.has_write_lock("shared.rs"));
+        composer.start_agent(id2).unwrap();
+        assert_eq!(
+            composer.get_agent(&id2).unwrap().0.phase,
+            AgentPhase::Running
+        );
+    }
+
+    #[test]
+    fn test_reader_waits_for_active_writer() {
+        let mut composer = Composer::default();
+        let writer = SubAgentConfigBuilder::new("writer", "write")
+            .write_files(vec!["shared.rs".into()])
+            .build();
+        let writer_id = composer.register_agent(writer);
+        composer.start_agent(writer_id).unwrap();
+
+        let reader = SubAgentConfigBuilder::new("reader", "read")
+            .read_files(vec!["shared.rs".into()])
+            .build();
+        let reader_id = composer.register_agent(reader);
+
+        assert!(composer.start_agent(reader_id).is_err());
+        assert_eq!(
+            composer.get_agent(&reader_id).unwrap().1.phase,
+            AgentPhase::WaitingForLock
+        );
+
+        composer.complete_agent(
+            writer_id,
+            SubAgentResult {
+                agent_id: writer_id,
+                name: "writer".into(),
+                summary: "done".into(),
+                output: None,
+                modified_files: vec!["shared.rs".into()],
+                success: true,
+                error: None,
+                duration_ms: 1,
+            },
+        );
+
+        composer.start_agent(reader_id).unwrap();
+        assert_eq!(
+            composer.get_agent(&reader_id).unwrap().0.phase,
+            AgentPhase::Running
+        );
+    }
+
+    #[test]
+    fn test_failed_start_rolls_back_newly_acquired_locks() {
+        let mut composer = Composer::default();
+        let blocker = SubAgentConfigBuilder::new("blocker", "write")
+            .write_files(vec!["blocked.rs".into()])
+            .build();
+        let blocker_id = composer.register_agent(blocker);
+        composer.start_agent(blocker_id).unwrap();
+
+        let waiter = SubAgentConfigBuilder::new("waiter", "read")
+            .read_files(vec!["free.rs".into(), "blocked.rs".into()])
+            .build();
+        let waiter_id = composer.register_agent(waiter);
+
+        assert!(composer.start_agent(waiter_id).is_err());
+        assert!(!composer.file_locks.is_locked("free.rs"));
+        assert!(
+            composer
+                .get_agent(&waiter_id)
+                .unwrap()
+                .1
+                .held_locks
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_failed_start_preserves_preexisting_fifo_grant() {
+        let mut composer = Composer::default();
+        let first = composer.register_agent(
+            SubAgentConfigBuilder::new("first", "write")
+                .write_files(vec!["a.rs".into()])
+                .build(),
+        );
+        let blocker = composer.register_agent(
+            SubAgentConfigBuilder::new("blocker", "write")
+                .write_files(vec!["b.rs".into()])
+                .build(),
+        );
+        composer.start_agent(first).unwrap();
+        composer.start_agent(blocker).unwrap();
+
+        let waiter = composer.register_agent(
+            SubAgentConfigBuilder::new("waiter", "write")
+                .write_files(vec!["a.rs".into(), "b.rs".into()])
+                .build(),
+        );
+        assert!(composer.start_agent(waiter).is_err());
+
+        composer.complete_agent(
+            first,
+            SubAgentResult {
+                agent_id: first,
+                name: "first".into(),
+                summary: "done".into(),
+                output: None,
+                modified_files: vec!["a.rs".into()],
+                success: true,
+                error: None,
+                duration_ms: 1,
+            },
+        );
+
+        assert!(composer.start_agent(waiter).is_err());
+        assert_eq!(composer.file_locks.lock_holders("a.rs"), vec![waiter]);
+
+        composer.complete_agent(
+            blocker,
+            SubAgentResult {
+                agent_id: blocker,
+                name: "blocker".into(),
+                summary: "done".into(),
+                output: None,
+                modified_files: vec!["b.rs".into()],
+                success: true,
+                error: None,
+                duration_ms: 1,
+            },
+        );
+        composer.start_agent(waiter).unwrap();
+        assert_eq!(
+            composer.get_agent(&waiter).unwrap().0.phase,
+            AgentPhase::Running
+        );
     }
 
     #[test]

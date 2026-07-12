@@ -748,7 +748,16 @@ impl App {
             return;
         };
         while let Ok(event) = rx.try_recv() {
+            let terminal = matches!(
+                &event,
+                RunnerEvent::RunFinished { .. }
+                    | RunnerEvent::RunCancelled { .. }
+                    | RunnerEvent::FatalError { .. }
+            );
             self.apply_runner_event(event);
+            if terminal {
+                return;
+            }
         }
         self.runner_rx = Some(rx);
     }
@@ -974,13 +983,17 @@ impl App {
             }
             RunnerEvent::Error { message } => {
                 self.error_count += 1;
-                self.mode = RunMode::Idle;
-                self.runner_tx = None;
-                self.runner_rx = None;
-                self.active_run_id = None;
-                self.running_runs.clear();
                 self.add_log(LogLevel::Error, "runner", &message);
                 self.add_message(MessageRole::System, format!("Runner error: {message}"));
+            }
+            RunnerEvent::FatalError { message } => {
+                let run_id = self
+                    .active_run_id
+                    .clone()
+                    .unwrap_or_else(|| "unknown".into());
+                self.on_run_failed(&run_id, &message);
+                self.runner_rx = None;
+                self.active_run_id = None;
             }
         }
         self.apply_live_agent_overlays();
@@ -1301,6 +1314,7 @@ impl App {
                 format!("agent {} priority -> {}", short_id(agent_id), priority)
             }
             RunnerEvent::Error { message } => format!("error: {message}"),
+            RunnerEvent::FatalError { message } => format!("fatal_error: {message}"),
         };
         tracing::info!(
             target: "odin_tui::event_trace",
@@ -1523,7 +1537,9 @@ fn load_display_config() -> Result<odin_core::config::OdinConfig> {
         "~/.raven-agent/config.yaml",
         "~/.odin/config.yaml",
         "raven.yaml",
+        "raven.yml",
         "odin.yaml",
+        "odin.yml",
     ] {
         let path = PathBuf::from(shellexpand::tilde(candidate).to_string());
         if path.exists() {

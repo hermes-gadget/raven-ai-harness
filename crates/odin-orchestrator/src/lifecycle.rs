@@ -167,10 +167,17 @@ impl AgentLifecycle {
 
     /// Mark as waiting for file lock.
     pub fn wait_for_lock(&mut self, file: impl Into<String>) {
-        self.transition(
-            AgentPhase::WaitingForLock,
-            Some(format!("Waiting for write lock on '{}'", file.into())),
-        );
+        let reason = format!("Waiting for write lock on '{}'", file.into());
+        if self.phase == AgentPhase::WaitingForLock
+            && self
+                .history
+                .last()
+                .and_then(|entry| entry.reason.as_deref())
+                == Some(reason.as_str())
+        {
+            return;
+        }
+        self.transition(AgentPhase::WaitingForLock, Some(reason));
     }
 
     /// Mark as done.
@@ -209,7 +216,9 @@ impl AgentLifecycle {
 
     /// Record that a file lock was acquired.
     pub fn lock_acquired(&mut self, path: &str) {
-        self.held_locks.push(path.to_string());
+        if !self.held_locks.iter().any(|held| held == path) {
+            self.held_locks.push(path.to_string());
+        }
     }
 
     /// Record that a file lock was released.
@@ -272,6 +281,19 @@ mod tests {
     }
 
     #[test]
+    fn test_wait_for_same_lock_is_idempotent() {
+        let mut lifecycle = AgentLifecycle::new(Uuid::new_v4());
+        lifecycle.wait_for_lock("shared.rs");
+        let history_len = lifecycle.history.len();
+        let changed_at = lifecycle.phase_changed_at;
+
+        lifecycle.wait_for_lock("shared.rs");
+
+        assert_eq!(lifecycle.history.len(), history_len);
+        assert_eq!(lifecycle.phase_changed_at, changed_at);
+    }
+
+    #[test]
     fn test_failure_and_retry() {
         let id = Uuid::new_v4();
         let mut lc = AgentLifecycle::new(id);
@@ -312,6 +334,7 @@ mod tests {
 
         lc.lock_acquired("src/main.rs");
         lc.lock_acquired("Cargo.toml");
+        lc.lock_acquired("src/main.rs");
         assert_eq!(lc.held_locks.len(), 2);
 
         lc.lock_released("src/main.rs");

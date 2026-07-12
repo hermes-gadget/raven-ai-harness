@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn test_runner_error_clears_active_run_handles() {
+    fn test_runner_error_keeps_active_run_controllable() {
         let mut app = App::default_test();
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RunnerCommand>();
         let (_event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
@@ -634,19 +634,44 @@ mod tests {
         app.runner_rx = Some(event_rx);
 
         app.apply_runner_event(RunnerEvent::Error {
-            message: "provider unavailable".into(),
+            message: "one sub-agent failed".into(),
         });
+
+        assert_eq!(app.mode, RunMode::Running);
+        assert!(app.runner_tx.is_some());
+        assert!(app.runner_rx.is_some());
+        assert_eq!(app.active_run_id.as_deref(), Some("run-err"));
+        assert_eq!(app.running_runs, vec!["run-err"]);
+        assert!(
+            app.messages
+                .iter()
+                .any(|message| message.content.contains("one sub-agent failed"))
+        );
+    }
+
+    #[test]
+    fn test_fatal_runner_error_terminalizes_active_run() {
+        let mut app = App::default_test();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<RunnerCommand>();
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<RunnerEvent>();
+        app.mode = RunMode::Running;
+        app.active_run_id = Some("run-fatal".into());
+        app.running_runs = vec!["run-fatal".into()];
+        app.runner_tx = Some(tx);
+        app.runner_rx = Some(event_rx);
+
+        event_tx
+            .send(RunnerEvent::FatalError {
+                message: "runner exited".into(),
+            })
+            .unwrap();
+        app.drain_runner_events();
 
         assert_eq!(app.mode, RunMode::Idle);
         assert!(app.runner_tx.is_none());
         assert!(app.runner_rx.is_none());
         assert!(app.active_run_id.is_none());
         assert!(app.running_runs.is_empty());
-        assert!(
-            app.messages
-                .iter()
-                .any(|message| message.content.contains("provider unavailable"))
-        );
     }
 
     #[test]
