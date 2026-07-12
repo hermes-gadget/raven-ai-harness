@@ -79,6 +79,61 @@ impl AgentTaskSet {
             }
         }
     }
+
+    async fn abort_all_and_drain(&mut self) {
+        self.tasks.abort_all();
+        while self.join_next().await.is_some() {}
+        debug_assert!(self.agents_by_task.is_empty());
+    }
+}
+
+async fn cleanup_failed_orchestration(
+    agent_handles: &mut AgentTaskSet,
+    composer: &mut Composer,
+    agent_ids: &[uuid::Uuid],
+    reason: &str,
+) {
+    agent_handles.abort_all_and_drain().await;
+    for agent_id in agent_ids {
+        let is_terminal = composer
+            .get_agent(agent_id)
+            .map(|(_, lifecycle)| lifecycle.phase.is_terminal())
+            .unwrap_or(true);
+        if !is_terminal {
+            composer.fail_agent(*agent_id, reason);
+        }
+    }
+}
+
+async fn recover_failed_orchestration(
+    agent_handles: &mut AgentTaskSet,
+    composer: &mut Composer,
+    store: &odin_orchestrator::persistence::SqliteOrchestrationStore,
+    root_goal: &str,
+    agent_ids: &[uuid::Uuid],
+    error: anyhow::Error,
+) -> anyhow::Error {
+    let primary_error = error.to_string();
+    let failure_reason = format!("Orchestration supervisor failed: {primary_error}");
+    cleanup_failed_orchestration(agent_handles, composer, agent_ids, &failure_reason).await;
+
+    let mut cleanup_errors = Vec::new();
+    for agent_id in agent_ids {
+        if let Err(cleanup_error) =
+            persist_orchestration_state(store, composer, root_goal, *agent_id).await
+        {
+            cleanup_errors.push(cleanup_error.to_string());
+        }
+    }
+
+    if cleanup_errors.is_empty() {
+        anyhow::anyhow!(primary_error)
+    } else {
+        anyhow::anyhow!(
+            "{primary_error}; cleanup persistence also failed: {}",
+            cleanup_errors.join("; ")
+        )
+    }
 }
 
 async fn persist_orchestration_state(
@@ -875,194 +930,215 @@ async fn run_orchestrated(
         pending.len()
     );
 
-    while terminal.len() < pending.len() {
-        // Start any queued agents that can acquire locks now.
-        let mut ordered: Vec<_> = pending
-            .iter()
-            .filter(|agent| {
-                !spawned.contains(&agent.agent_id) && !terminal.contains(&agent.agent_id)
-            })
-            .cloned()
-            .collect();
-        ordered.sort_by_key(|agent| (agent.priority, agent.label.clone()));
-
-        for agent in ordered {
-            let scoped_registry = match tool_registry.scoped(&agent.allowed_tools) {
-                Ok(registry) => Arc::new(registry),
-                Err(error) => {
-                    composer.fail_agent(
-                        agent.agent_id,
-                        format!("Invalid tool scope for agent '{}': {error}", agent.label),
-                    );
-                    terminal.insert(agent.agent_id);
-                    persist_orchestration_state(&store, &composer, &root_goal, agent.agent_id)
-                        .await?;
-                    continue;
-                }
-            };
-
-            match composer.start_agent(agent.agent_id) {
-                Ok(()) => {
-                    tracing::info!("[ORCH] Agent '{}' started", agent.label);
-                    spawned.insert(agent.agent_id);
-                    if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
-                        store.save_agent_lifecycle(lifecycle).await?;
-                    }
-                    let graph = composer.get_graph(&root_goal).ok_or_else(|| {
-                        anyhow::anyhow!("task graph missing for root goal during spawn")
-                    })?;
-                    store.save_task_graph(graph).await?;
-                    let lock_snapshot = serde_json::to_string(&composer.file_locks().snapshot())?;
-                    store.save_lock_snapshot(&lock_snapshot).await?;
-
-                    let provider = provider.clone();
-                    let policy_engine = policy_engine.clone();
-                    let audit_logger = audit_logger.clone();
-                    let task_goal = agent.task_goal.clone();
-                    let label_for_result = agent.label.clone();
-                    let model_name = model_name.clone();
-                    let agent_id = agent.agent_id;
-
-                    agent_handles.spawn(agent.agent_id, async move {
-                        let mut final_result = Err(odin_core::error::OdinError::Internal(
-                            "Agent did not execute".into(),
-                        ));
-                        let mut total_elapsed = std::time::Duration::ZERO;
-
-                        for attempt in 0..=max_retries {
-                            let engine = odin_loop::LoopEngine::new()
-                                .with_provider(provider.clone())
-                                .with_model_name(model_name.clone())
-                                .with_policy_engine(policy_engine.clone())
-                                .with_max_iterations(max_iterations)
-                                .with_tool_registry(scoped_registry.clone())
-                                .with_audit_logger(audit_logger.clone());
-
-                            let task = AgentTask {
-                                id: uuid::Uuid::new_v4(),
-                                goal: task_goal.clone(),
-                                context: None,
-                                sub_tasks: vec![],
-                                success_criteria: vec![],
-                                max_iterations,
-                                created_at: chrono::Utc::now(),
-                            };
-
-                            let start = std::time::Instant::now();
-                            let result = engine.execute_task(&task).await;
-                            let elapsed = start.elapsed();
-                            total_elapsed += elapsed;
-
-                            let is_success = result.as_ref().map(|r| r.success).unwrap_or(false);
-
-                            if is_success || attempt == max_retries {
-                                final_result = result;
-                                break;
-                            }
-
-                            let err_msg = result
-                                .as_ref()
-                                .err()
-                                .map(|e| e.to_string())
-                                .or_else(|| result.as_ref().ok().and_then(|r| r.error.clone()))
-                                .unwrap_or_else(|| "unknown error".to_string());
-                            tracing::warn!(
-                                "[ORCH] Agent '{}' attempt {}/{} failed: {}",
-                                label_for_result,
-                                attempt + 1,
-                                max_retries + 1,
-                                err_msg
-                            );
-                        }
-
-                        (agent_id, label_for_result, final_result, total_elapsed)
-                    });
-                }
-                Err(msg) => {
-                    tracing::info!("[ORCH] Agent '{}' queued: {}", agent.label, msg);
-                    if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
-                        store.save_agent_lifecycle(lifecycle).await?;
-                    }
-                    if let Some(graph) = composer.get_graph(&root_goal) {
-                        store.save_task_graph(graph).await?;
-                    }
-                    let lock_snapshot = serde_json::to_string(&composer.file_locks().snapshot())?;
-                    store.save_lock_snapshot(&lock_snapshot).await?;
-                }
-            }
-        }
-
-        if agent_handles.is_empty() {
-            // No in-flight work remains, but some agents never started — fail them.
-            let stuck: Vec<uuid::Uuid> = pending
+    let all_agent_ids: Vec<uuid::Uuid> = pending.iter().map(|agent| agent.agent_id).collect();
+    let execution_result: anyhow::Result<()> = async {
+        while terminal.len() < pending.len() {
+            // Start any queued agents that can acquire locks now.
+            let mut ordered: Vec<_> = pending
                 .iter()
                 .filter(|agent| {
                     !spawned.contains(&agent.agent_id) && !terminal.contains(&agent.agent_id)
                 })
-                .map(|agent| agent.agent_id)
+                .cloned()
                 .collect();
-            for agent_id in stuck {
-                composer.fail_agent(
-                    agent_id,
-                    "Could not acquire file locks and no running agents hold them",
-                );
-                terminal.insert(agent_id);
-                persist_orchestration_state(&store, &composer, &root_goal, agent_id).await?;
-            }
-            break;
-        }
+            ordered.sort_by_key(|agent| (agent.priority, agent.label.clone()));
 
-        // Process whichever agent finishes first so its locks are released promptly.
-        let (spawned_agent_id, completion) = agent_handles
-            .join_next()
-            .await
-            .expect("non-empty orchestration task set must yield a completion");
-        match completion {
-            Ok((agent_id, label, result, elapsed)) => {
-                match result {
-                    Ok(task_result) => {
-                        println!(
-                            "  {} {} — {} ({}ms, {} iters)",
-                            if task_result.success { "✅" } else { "⚠️" },
-                            label,
-                            if task_result.success {
-                                "success"
-                            } else {
-                                "failed"
-                            },
-                            elapsed.as_millis(),
-                            task_result.iterations,
-                        );
-                        composer.complete_agent(
-                            agent_id,
-                            SubAgentResult {
-                                agent_id,
-                                name: label,
-                                summary: task_result.summary.clone(),
-                                output: Some(task_result.summary),
-                                modified_files: vec![],
-                                success: task_result.success,
-                                error: task_result.error,
-                                duration_ms: elapsed.as_millis() as u64,
-                            },
-                        );
-                    }
+            for agent in ordered {
+                let scoped_registry = match tool_registry.scoped(&agent.allowed_tools) {
+                    Ok(registry) => Arc::new(registry),
                     Err(error) => {
-                        println!("  ❌ {} — error: {}", label, error);
-                        composer.fail_agent(agent_id, error.to_string());
+                        composer.fail_agent(
+                            agent.agent_id,
+                            format!("Invalid tool scope for agent '{}': {error}", agent.label),
+                        );
+                        terminal.insert(agent.agent_id);
+                        persist_orchestration_state(&store, &composer, &root_goal, agent.agent_id)
+                            .await?;
+                        continue;
+                    }
+                };
+
+                match composer.start_agent(agent.agent_id) {
+                    Ok(()) => {
+                        tracing::info!("[ORCH] Agent '{}' started", agent.label);
+                        spawned.insert(agent.agent_id);
+                        if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
+                            store.save_agent_lifecycle(lifecycle).await?;
+                        }
+                        let graph = composer.get_graph(&root_goal).ok_or_else(|| {
+                            anyhow::anyhow!("task graph missing for root goal during spawn")
+                        })?;
+                        store.save_task_graph(graph).await?;
+                        let lock_snapshot =
+                            serde_json::to_string(&composer.file_locks().snapshot())?;
+                        store.save_lock_snapshot(&lock_snapshot).await?;
+
+                        let provider = provider.clone();
+                        let policy_engine = policy_engine.clone();
+                        let audit_logger = audit_logger.clone();
+                        let task_goal = agent.task_goal.clone();
+                        let label_for_result = agent.label.clone();
+                        let model_name = model_name.clone();
+                        let agent_id = agent.agent_id;
+
+                        agent_handles.spawn(agent.agent_id, async move {
+                            let mut final_result = Err(odin_core::error::OdinError::Internal(
+                                "Agent did not execute".into(),
+                            ));
+                            let mut total_elapsed = std::time::Duration::ZERO;
+
+                            for attempt in 0..=max_retries {
+                                let engine = odin_loop::LoopEngine::new()
+                                    .with_provider(provider.clone())
+                                    .with_model_name(model_name.clone())
+                                    .with_policy_engine(policy_engine.clone())
+                                    .with_max_iterations(max_iterations)
+                                    .with_tool_registry(scoped_registry.clone())
+                                    .with_audit_logger(audit_logger.clone());
+
+                                let task = AgentTask {
+                                    id: uuid::Uuid::new_v4(),
+                                    goal: task_goal.clone(),
+                                    context: None,
+                                    sub_tasks: vec![],
+                                    success_criteria: vec![],
+                                    max_iterations,
+                                    created_at: chrono::Utc::now(),
+                                };
+
+                                let start = std::time::Instant::now();
+                                let result = engine.execute_task(&task).await;
+                                let elapsed = start.elapsed();
+                                total_elapsed += elapsed;
+
+                                let is_success =
+                                    result.as_ref().map(|r| r.success).unwrap_or(false);
+
+                                if is_success || attempt == max_retries {
+                                    final_result = result;
+                                    break;
+                                }
+
+                                let err_msg = result
+                                    .as_ref()
+                                    .err()
+                                    .map(|e| e.to_string())
+                                    .or_else(|| result.as_ref().ok().and_then(|r| r.error.clone()))
+                                    .unwrap_or_else(|| "unknown error".to_string());
+                                tracing::warn!(
+                                    "[ORCH] Agent '{}' attempt {}/{} failed: {}",
+                                    label_for_result,
+                                    attempt + 1,
+                                    max_retries + 1,
+                                    err_msg
+                                );
+                            }
+
+                            (agent_id, label_for_result, final_result, total_elapsed)
+                        });
+                    }
+                    Err(msg) => {
+                        tracing::info!("[ORCH] Agent '{}' queued: {}", agent.label, msg);
+                        if let Some((_, lifecycle)) = composer.get_agent(&agent.agent_id) {
+                            store.save_agent_lifecycle(lifecycle).await?;
+                        }
+                        if let Some(graph) = composer.get_graph(&root_goal) {
+                            store.save_task_graph(graph).await?;
+                        }
+                        let lock_snapshot =
+                            serde_json::to_string(&composer.file_locks().snapshot())?;
+                        store.save_lock_snapshot(&lock_snapshot).await?;
                     }
                 }
-                terminal.insert(agent_id);
-                persist_orchestration_state(&store, &composer, &root_goal, agent_id).await?;
             }
-            Err(error) => {
-                tracing::error!("[ORCH] Sub-agent task failed: {}", error);
-                composer.fail_agent(spawned_agent_id, format!("Sub-agent task failed: {error}"));
-                terminal.insert(spawned_agent_id);
-                persist_orchestration_state(&store, &composer, &root_goal, spawned_agent_id)
-                    .await?;
+
+            if agent_handles.is_empty() {
+                // No in-flight work remains, but some agents never started — fail them.
+                let stuck: Vec<uuid::Uuid> = pending
+                    .iter()
+                    .filter(|agent| {
+                        !spawned.contains(&agent.agent_id) && !terminal.contains(&agent.agent_id)
+                    })
+                    .map(|agent| agent.agent_id)
+                    .collect();
+                for agent_id in stuck {
+                    composer.fail_agent(
+                        agent_id,
+                        "Could not acquire file locks and no running agents hold them",
+                    );
+                    terminal.insert(agent_id);
+                    persist_orchestration_state(&store, &composer, &root_goal, agent_id).await?;
+                }
+                break;
+            }
+
+            // Process whichever agent finishes first so its locks are released promptly.
+            let (spawned_agent_id, completion) = agent_handles
+                .join_next()
+                .await
+                .expect("non-empty orchestration task set must yield a completion");
+            match completion {
+                Ok((agent_id, label, result, elapsed)) => {
+                    match result {
+                        Ok(task_result) => {
+                            println!(
+                                "  {} {} — {} ({}ms, {} iters)",
+                                if task_result.success { "✅" } else { "⚠️" },
+                                label,
+                                if task_result.success {
+                                    "success"
+                                } else {
+                                    "failed"
+                                },
+                                elapsed.as_millis(),
+                                task_result.iterations,
+                            );
+                            composer.complete_agent(
+                                agent_id,
+                                SubAgentResult {
+                                    agent_id,
+                                    name: label,
+                                    summary: task_result.summary.clone(),
+                                    output: Some(task_result.summary),
+                                    modified_files: vec![],
+                                    success: task_result.success,
+                                    error: task_result.error,
+                                    duration_ms: elapsed.as_millis() as u64,
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            println!("  ❌ {} — error: {}", label, error);
+                            composer.fail_agent(agent_id, error.to_string());
+                        }
+                    }
+                    terminal.insert(agent_id);
+                    persist_orchestration_state(&store, &composer, &root_goal, agent_id).await?;
+                }
+                Err(error) => {
+                    tracing::error!("[ORCH] Sub-agent task failed: {}", error);
+                    composer
+                        .fail_agent(spawned_agent_id, format!("Sub-agent task failed: {error}"));
+                    terminal.insert(spawned_agent_id);
+                    persist_orchestration_state(&store, &composer, &root_goal, spawned_agent_id)
+                        .await?;
+                }
             }
         }
+        Ok(())
+    }
+    .await;
+
+    if let Err(error) = execution_result {
+        return Err(recover_failed_orchestration(
+            &mut agent_handles,
+            &mut composer,
+            &store,
+            &root_goal,
+            &all_agent_ids,
+            error,
+        )
+        .await);
     }
 
     let mut total_success = 0;
@@ -3193,6 +3269,8 @@ mod tests {
     use super::AgentTaskSet;
     use super::Cli;
     use super::Commands;
+    use super::cleanup_failed_orchestration;
+    use super::recover_failed_orchestration;
     use clap::Parser;
 
     #[tokio::test]
@@ -3223,6 +3301,171 @@ mod tests {
         let (completed_id, result) = tasks.join_next().await.unwrap();
         assert_eq!(completed_id, fast_id);
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_agent_task_set_abort_all_drops_inflight_future() {
+        struct DropFlag(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let mut tasks = AgentTaskSet::new();
+        let agent_id = uuid::Uuid::new_v4();
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let drop_flag = dropped.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        tasks.spawn(agent_id, async move {
+            let _drop_flag = DropFlag(drop_flag);
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+            unreachable!("aborted task must never complete normally")
+        });
+        started_rx.await.unwrap();
+
+        tasks.abort_all_and_drain().await;
+
+        assert!(tasks.is_empty());
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_failed_orchestration_terminalizes_agents_and_clears_locks() {
+        let mut composer = odin_orchestrator::Composer::default();
+        let first_id = composer.register_agent(odin_orchestrator::sub_agent::SubAgentConfig {
+            name: "first".into(),
+            goal: "write first".into(),
+            read_files: vec![],
+            write_files: vec!["shared.rs".into()],
+            allowed_tools: vec![],
+            required_capabilities: vec![],
+            max_iterations: 1,
+            priority: 0,
+            task_node_id: None,
+            injected_context: None,
+        });
+        let second_id = composer.register_agent(odin_orchestrator::sub_agent::SubAgentConfig {
+            name: "second".into(),
+            goal: "write second".into(),
+            read_files: vec![],
+            write_files: vec!["shared.rs".into()],
+            allowed_tools: vec![],
+            required_capabilities: vec![],
+            max_iterations: 1,
+            priority: 0,
+            task_node_id: None,
+            injected_context: None,
+        });
+        composer.start_agent(first_id).unwrap();
+        assert!(composer.start_agent(second_id).is_err());
+
+        let before = composer.file_locks().snapshot();
+        assert!(!before.held_locks.is_empty());
+        assert!(!before.write_queues.is_empty());
+
+        let mut tasks = AgentTaskSet::new();
+        tasks.spawn(first_id, async move {
+            std::future::pending::<()>().await;
+            unreachable!("cleanup must abort the running agent")
+        });
+
+        cleanup_failed_orchestration(
+            &mut tasks,
+            &mut composer,
+            &[first_id, second_id],
+            "persistence failure",
+        )
+        .await;
+
+        assert!(tasks.is_empty());
+        assert_eq!(
+            composer.get_agent(&first_id).unwrap().1.phase,
+            odin_orchestrator::lifecycle::AgentPhase::Failed
+        );
+        assert_eq!(
+            composer.get_agent(&second_id).unwrap().1.phase,
+            odin_orchestrator::lifecycle::AgentPhase::Failed
+        );
+        let after = composer.file_locks().snapshot();
+        assert!(after.held_locks.is_empty());
+        assert!(after.write_queues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_recover_failed_orchestration_persists_terminal_state() {
+        use odin_orchestrator::persistence::OrchestrationStore;
+
+        let root_goal = "write persisted cleanup";
+        let mut composer = odin_orchestrator::Composer::default();
+        let node_id = {
+            let graph = composer.intake(root_goal);
+            assert_eq!(graph.nodes.len(), 1);
+            *graph.nodes.keys().next().unwrap()
+        };
+        let agent_id = composer.register_agent(odin_orchestrator::sub_agent::SubAgentConfig {
+            name: "persisted".into(),
+            goal: root_goal.into(),
+            read_files: vec![],
+            write_files: vec!["persisted.rs".into()],
+            allowed_tools: vec![],
+            required_capabilities: vec![],
+            max_iterations: 1,
+            priority: 0,
+            task_node_id: Some(node_id),
+            injected_context: None,
+        });
+        composer.start_agent(agent_id).unwrap();
+
+        let store = odin_orchestrator::persistence::SqliteOrchestrationStore::new_in_memory()
+            .await
+            .unwrap();
+        store.initialize().await.unwrap();
+        store
+            .save_task_graph(composer.get_graph(root_goal).unwrap())
+            .await
+            .unwrap();
+        let (_, initial_lifecycle) = composer.get_agent(&agent_id).unwrap();
+        store.save_agent_lifecycle(initial_lifecycle).await.unwrap();
+        store
+            .save_lock_snapshot(&serde_json::to_string(&composer.file_locks().snapshot()).unwrap())
+            .await
+            .unwrap();
+
+        let mut tasks = AgentTaskSet::new();
+        tasks.spawn(agent_id, async move {
+            std::future::pending::<()>().await;
+            unreachable!("recovery must abort the running agent")
+        });
+
+        let recovered = recover_failed_orchestration(
+            &mut tasks,
+            &mut composer,
+            &store,
+            root_goal,
+            &[agent_id],
+            anyhow::anyhow!("persistence failure"),
+        )
+        .await;
+
+        assert!(recovered.to_string().contains("persistence failure"));
+        let lifecycle = store.load_agent_lifecycle(agent_id).await.unwrap();
+        assert_eq!(
+            lifecycle.phase,
+            odin_orchestrator::lifecycle::AgentPhase::Failed
+        );
+        let graph = store.load_task_graph(root_goal).await.unwrap();
+        assert_eq!(
+            graph.status,
+            odin_orchestrator::task_graph::TaskGraphStatus::Failed
+        );
+        let snapshot: odin_orchestrator::file_lock::LockSnapshot =
+            serde_json::from_str(&store.load_lock_snapshot().await.unwrap().unwrap()).unwrap();
+        assert!(snapshot.held_locks.is_empty());
+        assert!(snapshot.write_queues.is_empty());
     }
 
     #[test]
