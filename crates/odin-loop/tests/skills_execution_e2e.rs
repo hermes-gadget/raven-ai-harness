@@ -78,6 +78,7 @@ async fn test_skills_injected_via_loop_engine() {
         policy_engine: None,
         skill_registry: Some(registry.clone()),
         audit_logger: None,
+        reliability_tracker: None,
         model_profile: None,
     };
 

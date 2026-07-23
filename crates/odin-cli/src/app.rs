@@ -639,6 +639,7 @@ async fn cmd_run(
 
     let memory = Arc::new(build_memory_store(&config)?);
     let audit_logger = Arc::new(build_audit_logger(&config));
+    let reliability_tracker = build_reliability_tracker(&config)?;
     tracing::info!("[CLI] Memory store and audit logger initialized");
 
     // Branch: orchestrated (default) or direct single-agent
@@ -653,6 +654,7 @@ async fn cmd_run(
             &config,
             memory,
             audit_logger,
+            reliability_tracker,
         )
         .await;
     }
@@ -665,7 +667,8 @@ async fn cmd_run(
         .with_policy_engine(policy_engine.clone())
         .with_max_iterations(max_iterations)
         .with_tool_registry(tool_registry.clone())
-        .with_audit_logger(audit_logger.clone());
+        .with_audit_logger(audit_logger.clone())
+        .with_reliability_tracker(reliability_tracker);
 
     // Get available tools as Vec<Arc<dyn Tool>>
     let tools: Vec<Arc<dyn odin_core::traits::Tool>> = tool_registry
@@ -816,6 +819,7 @@ async fn run_orchestrated(
     config: &OdinConfig,
     _memory: Arc<odin_memory::SqliteMemoryStore>,
     audit_logger: Arc<odin_audit::AuditLoggerImpl>,
+    reliability_tracker: Arc<odin_tools::ReliabilityTracker>,
 ) -> anyhow::Result<()> {
     use odin_orchestrator::composer::ComposerConfig;
     use odin_orchestrator::merge::{MergeStrategy, SubAgentResult};
@@ -976,6 +980,7 @@ async fn run_orchestrated(
                         let provider = provider.clone();
                         let policy_engine = policy_engine.clone();
                         let audit_logger = audit_logger.clone();
+                        let reliability_tracker = reliability_tracker.clone();
                         let task_goal = agent.task_goal.clone();
                         let label_for_result = agent.label.clone();
                         let model_name = model_name.clone();
@@ -994,7 +999,8 @@ async fn run_orchestrated(
                                     .with_policy_engine(policy_engine.clone())
                                     .with_max_iterations(max_iterations)
                                     .with_tool_registry(scoped_registry.clone())
-                                    .with_audit_logger(audit_logger.clone());
+                                    .with_audit_logger(audit_logger.clone())
+                                    .with_reliability_tracker(reliability_tracker.clone());
 
                                 let task = AgentTask {
                                     id: uuid::Uuid::new_v4(),
@@ -1833,6 +1839,7 @@ async fn cmd_serve(addr: Option<String>, config_path: Option<PathBuf>) -> anyhow
 
     // Wire audit logger
     let audit_logger = Arc::new(build_audit_logger(&config));
+    let reliability_tracker = build_reliability_tracker(&config)?;
     tracing::info!("[CLI/serve] Audit logger initialized");
 
     // Discord shares the configured provider, tools, memory, policy, and audit
@@ -1855,7 +1862,8 @@ async fn cmd_serve(addr: Option<String>, config_path: Option<PathBuf>) -> anyhow
             .with_provider(provider.clone())
             .with_policy_engine(policy_engine.clone())
             .with_tool_registry(tool_registry.clone())
-            .with_audit_logger(audit_logger.clone());
+            .with_audit_logger(audit_logger.clone())
+            .with_reliability_tracker(reliability_tracker.clone());
         let agent = Agent::new(
             "discord-agent",
             Arc::new(engine),
@@ -1888,6 +1896,7 @@ async fn cmd_serve(addr: Option<String>, config_path: Option<PathBuf>) -> anyhow
     let handler: odin_gateway::TaskHandlerFn = {
         let memory = memory;
         let audit_logger = audit_logger;
+        let reliability_tracker = reliability_tracker;
         let tool_registry = tool_registry.clone();
         Arc::new(move |req: odin_gateway::ChatRequest| {
             let provider = provider.clone();
@@ -1896,6 +1905,7 @@ async fn cmd_serve(addr: Option<String>, config_path: Option<PathBuf>) -> anyhow
             let tools = tools.clone();
             let memory = memory.clone();
             let audit_logger = audit_logger.clone();
+            let reliability_tracker = reliability_tracker.clone();
             Box::pin(async move {
                 let start = std::time::Instant::now();
 
@@ -1904,7 +1914,8 @@ async fn cmd_serve(addr: Option<String>, config_path: Option<PathBuf>) -> anyhow
                     .with_policy_engine(policy_engine.clone())
                     .with_max_iterations(req.max_iterations.unwrap_or(100))
                     .with_tool_registry(tool_registry.clone())
-                    .with_audit_logger(audit_logger.clone());
+                    .with_audit_logger(audit_logger.clone())
+                    .with_reliability_tracker(reliability_tracker.clone());
 
                 let agent = Agent::new(
                     "serve-agent",
@@ -2822,11 +2833,28 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
             approve,
         } => {
             let registry = build_tool_registry();
+            let reliability_tracker = if dry_run {
+                None
+            } else {
+                let config = load_config(None)?;
+                Some(build_reliability_tracker(&config)?)
+            };
             match registry.get(&name) {
                 Some(tool) => {
                     let json_args: serde_json::Value = match args {
-                        Some(ref inline) => serde_json::from_str(inline)
-                            .map_err(|e| anyhow::anyhow!("Invalid JSON args: {e}"))?,
+                        Some(ref inline) => match serde_json::from_str(inline) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                if let Some(tracker) = &reliability_tracker {
+                                    tracker.record_outcome(
+                                        &name,
+                                        odin_tools::ReliabilityOutcome::ValidationFailure,
+                                        0,
+                                    );
+                                }
+                                return Err(anyhow::anyhow!("Invalid JSON args: {error}"));
+                            }
+                        },
                         None => serde_json::json!({}),
                     };
 
@@ -2869,6 +2897,13 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                         }
                     } else {
                         if (tool.requires_approval() || tool.is_dangerous()) && !approve {
+                            if let Some(tracker) = &reliability_tracker {
+                                tracker.record_outcome(
+                                    tool.name(),
+                                    odin_tools::ReliabilityOutcome::PolicyDenial,
+                                    0,
+                                );
+                            }
                             anyhow::bail!(
                                 "Tool '{}' requires approval. Review the arguments, then rerun with --approve; use --dry-run to validate without execution.",
                                 tool.name()
@@ -2893,6 +2928,17 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                         match tool.execute(json_args, &context).await {
                             Ok(result) => {
                                 let elapsed = start.elapsed();
+                                if let Some(tracker) = &reliability_tracker {
+                                    tracker.record_outcome(
+                                        tool.name(),
+                                        if result.success {
+                                            odin_tools::ReliabilityOutcome::Success
+                                        } else {
+                                            odin_tools::ReliabilityOutcome::ToolFailure
+                                        },
+                                        elapsed.as_millis() as u64,
+                                    );
+                                }
                                 println!(
                                     "  Status:   {}",
                                     if result.success {
@@ -2908,6 +2954,13 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
+                                if let Some(tracker) = &reliability_tracker {
+                                    tracker.record_outcome(
+                                        tool.name(),
+                                        odin_tools::classify_tool_error(&e),
+                                        start.elapsed().as_millis() as u64,
+                                    );
+                                }
                                 println!("  Error: {}", redactor.redact(&e.to_string()));
                                 std::process::exit(1);
                             }
@@ -3001,10 +3054,35 @@ async fn cmd_tools(action: ToolsAction) -> anyhow::Result<()> {
             }
         }
         ToolsAction::Reliability => {
-            println!("No persisted tool reliability samples are available.");
+            let config = load_config(None)?;
+            let tracker = build_reliability_tracker(&config)?;
+            let reliability = tracker.all();
+            if reliability.is_empty() {
+                println!("No persisted tool reliability samples are available.");
+                return Ok(());
+            }
+
             println!(
-                "Reliability scoring is implemented in-memory, but CLI execution history is not yet connected to it."
+                "{:<24} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>9}",
+                "Tool", "Score", "Calls", "Success", "Policy", "Valid.", "Trans.", "Tool", "Avg ms"
             );
+            for item in reliability {
+                println!(
+                    "{:<24} {:>6.0}% {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>9.1}",
+                    item.tool_name,
+                    item.score * 100.0,
+                    item.total_calls,
+                    item.success_count,
+                    item.policy_denial_count,
+                    item.validation_failure_count,
+                    item.transport_failure_count,
+                    item.tool_failure_count,
+                    item.avg_duration_ms,
+                );
+                if let Some(timestamp) = item.latest_timestamp {
+                    println!("{:>33} latest {}", "", timestamp.to_rfc3339());
+                }
+            }
         }
     }
     Ok(())
@@ -3139,6 +3217,24 @@ fn configured_data_dir(config: &OdinConfig) -> PathBuf {
         || PathBuf::from(shellexpand::tilde("~/.raven-agent").to_string()),
         |path| PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).to_string()),
     )
+}
+
+fn configured_reliability_path(config: &OdinConfig) -> PathBuf {
+    configured_data_dir(config).join("reliability.db")
+}
+
+fn build_reliability_tracker(
+    config: &OdinConfig,
+) -> anyhow::Result<Arc<odin_tools::ReliabilityTracker>> {
+    let path = configured_reliability_path(config);
+    odin_tools::ReliabilityTracker::persistent(&path, odin_tools::ReliabilityConfig::default())
+        .map(Arc::new)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "failed to open reliability store '{}': {error}",
+                path.display()
+            )
+        })
 }
 
 fn build_memory_store(config: &OdinConfig) -> anyhow::Result<odin_memory::SqliteMemoryStore> {

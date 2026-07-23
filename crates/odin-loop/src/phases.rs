@@ -53,6 +53,8 @@ pub struct PhaseContext {
     pub skill_registry: Option<Arc<odin_skills::SkillRegistry>>,
     /// Optional audit logger for recording tool calls and events
     pub audit_logger: Option<Arc<dyn AuditLogger>>,
+    /// Optional persistent tracker for real tool attempts.
+    pub reliability_tracker: Option<Arc<odin_tools::ReliabilityTracker>>,
     /// Optional small/local model profile for bounded prompts and retries
     pub model_profile: Option<SmallModelProfile>,
 }
@@ -268,10 +270,22 @@ impl Phase for ActPhase {
                         {
                             let mut results = Vec::new();
                             for tc in calls {
+                                let attempt_start = std::time::Instant::now();
                                 let tool_name = tc.function.name.clone();
+                                let requested_dry_run =
+                                    !should_record_reliability(&tc.function.arguments, &[]);
                                 let tool = match registry.get(&tool_name) {
                                     Some(t) => t,
                                     None => {
+                                        if !requested_dry_run
+                                            && let Some(tracker) = &context.reliability_tracker
+                                        {
+                                            tracker.record_outcome(
+                                                &tool_name,
+                                                odin_tools::ReliabilityOutcome::ValidationFailure,
+                                                attempt_start.elapsed().as_millis() as u64,
+                                            );
+                                        }
                                         let tr = ToolResult {
                                             call_id: tc.id.clone(),
                                             tool_name: tool_name.clone(),
@@ -288,48 +302,20 @@ impl Phase for ActPhase {
                                         continue;
                                     }
                                 };
+                                let is_dry_run = !should_record_reliability(
+                                    &tc.function.arguments,
+                                    tool.capability_tags(),
+                                );
 
                                 let schema = tool.schema();
-                                let args: serde_json::Value =
-                                    match serde_json::from_str(&tc.function.arguments) {
-                                        Ok(value) => match tool.validate_args(&value) {
-                                            Ok(()) => value,
-                                            Err(validation_error) => {
-                                                match repair_tool_argument_value(
-                                                    &tool_name, value, &schema,
-                                                ) {
-                                                    Some(repair)
-                                                        if tool
-                                                            .validate_args(&repair.args)
-                                                            .is_ok() =>
-                                                    {
-                                                        tracing::info!(
-                                                            tool = %tool_name,
-                                                            reason = %repair.reason,
-                                                            "[ACT] Repaired parsed tool arguments"
-                                                        );
-                                                        repair.args
-                                                    }
-                                                    _ => {
-                                                        let tr = tool_arg_error_result(
-                                                            &tc,
-                                                            &tool_name,
-                                                            format!(
-                                                                "Invalid tool args: {}",
-                                                                validation_error
-                                                            ),
-                                                        );
-                                                        results.push(tr);
-                                                        continue;
-                                                    }
-                                                }
-                                            }
-                                        },
-                                        Err(parse_error) => {
-                                            match repair_tool_arguments_once(
-                                                &tool_name,
-                                                &tc.function.arguments,
-                                                &schema,
+                                let args: serde_json::Value = match serde_json::from_str(
+                                    &tc.function.arguments,
+                                ) {
+                                    Ok(value) => match tool.validate_args(&value) {
+                                        Ok(()) => value,
+                                        Err(validation_error) => {
+                                            match repair_tool_argument_value(
+                                                &tool_name, value, &schema,
                                             ) {
                                                 Some(repair)
                                                     if tool.validate_args(&repair.args).is_ok() =>
@@ -337,17 +323,28 @@ impl Phase for ActPhase {
                                                     tracing::info!(
                                                         tool = %tool_name,
                                                         reason = %repair.reason,
-                                                        "[ACT] Repaired malformed tool arguments"
+                                                        "[ACT] Repaired parsed tool arguments"
                                                     );
                                                     repair.args
                                                 }
                                                 _ => {
+                                                    if !is_dry_run
+                                                        && let Some(tracker) =
+                                                            &context.reliability_tracker
+                                                    {
+                                                        tracker.record_outcome(
+                                                                &tool_name,
+                                                                odin_tools::ReliabilityOutcome::ValidationFailure,
+                                                                attempt_start.elapsed().as_millis()
+                                                                    as u64,
+                                                            );
+                                                    }
                                                     let tr = tool_arg_error_result(
                                                         &tc,
                                                         &tool_name,
                                                         format!(
                                                             "Invalid tool args: {}",
-                                                            parse_error
+                                                            validation_error
                                                         ),
                                                     );
                                                     results.push(tr);
@@ -355,7 +352,46 @@ impl Phase for ActPhase {
                                                 }
                                             }
                                         }
-                                    };
+                                    },
+                                    Err(parse_error) => {
+                                        match repair_tool_arguments_once(
+                                            &tool_name,
+                                            &tc.function.arguments,
+                                            &schema,
+                                        ) {
+                                            Some(repair)
+                                                if tool.validate_args(&repair.args).is_ok() =>
+                                            {
+                                                tracing::info!(
+                                                    tool = %tool_name,
+                                                    reason = %repair.reason,
+                                                    "[ACT] Repaired malformed tool arguments"
+                                                );
+                                                repair.args
+                                            }
+                                            _ => {
+                                                if !is_dry_run
+                                                    && let Some(tracker) =
+                                                        &context.reliability_tracker
+                                                {
+                                                    tracker.record_outcome(
+                                                            &tool_name,
+                                                            odin_tools::ReliabilityOutcome::ValidationFailure,
+                                                            attempt_start.elapsed().as_millis()
+                                                                as u64,
+                                                        );
+                                                }
+                                                let tr = tool_arg_error_result(
+                                                    &tc,
+                                                    &tool_name,
+                                                    format!("Invalid tool args: {}", parse_error),
+                                                );
+                                                results.push(tr);
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                };
 
                                 let tool_context = ToolContext {
                                     agent_id: uuid::Uuid::default(),
@@ -473,6 +509,15 @@ impl Phase for ActPhase {
                                 };
 
                                 if let Some(error) = policy_error {
+                                    if !is_dry_run
+                                        && let Some(tracker) = &context.reliability_tracker
+                                    {
+                                        tracker.record_outcome(
+                                            &tool_name,
+                                            odin_tools::ReliabilityOutcome::PolicyDenial,
+                                            attempt_start.elapsed().as_millis() as u64,
+                                        );
+                                    }
                                     let tr = ToolResult {
                                         call_id: tc.id.clone(),
                                         tool_name: tool_name.clone(),
@@ -490,18 +535,39 @@ impl Phase for ActPhase {
                                 // Capture input summary before moving args into execute
                                 let input_summary: String =
                                     args.to_string().chars().take(200).collect();
-                                let mut tr = match tool.execute(args, &tool_context).await {
-                                    Ok(tr) => tr,
-                                    Err(e) => ToolResult {
-                                        call_id: tc.id.clone(),
-                                        tool_name: tool_name.clone(),
-                                        success: false,
-                                        output: String::new(),
-                                        error: Some(e.to_string()),
-                                        duration_ms: start.elapsed().as_millis() as u64,
-                                        timestamp: chrono::Utc::now(),
-                                    },
-                                };
+                                let (mut tr, outcome) =
+                                    match tool.execute(args, &tool_context).await {
+                                        Ok(tr) => {
+                                            let outcome = if tr.success {
+                                                odin_tools::ReliabilityOutcome::Success
+                                            } else {
+                                                odin_tools::ReliabilityOutcome::ToolFailure
+                                            };
+                                            (tr, outcome)
+                                        }
+                                        Err(e) => {
+                                            let outcome = odin_tools::classify_tool_error(&e);
+                                            (
+                                                ToolResult {
+                                                    call_id: tc.id.clone(),
+                                                    tool_name: tool_name.clone(),
+                                                    success: false,
+                                                    output: String::new(),
+                                                    error: Some(e.to_string()),
+                                                    duration_ms: start.elapsed().as_millis() as u64,
+                                                    timestamp: chrono::Utc::now(),
+                                                },
+                                                outcome,
+                                            )
+                                        }
+                                    };
+                                if !is_dry_run && let Some(tracker) = &context.reliability_tracker {
+                                    tracker.record_outcome(
+                                        &tool_name,
+                                        outcome,
+                                        start.elapsed().as_millis() as u64,
+                                    );
+                                }
 
                                 // Apply secret redaction before audit logging
                                 let redactor = SecretRedactor::new();
@@ -1216,6 +1282,16 @@ fn tool_arg_error_result(tc: &ToolCall, tool_name: &str, error: String) -> ToolR
     }
 }
 
+fn should_record_reliability(arguments: &str, capability_tags: &[&str]) -> bool {
+    if capability_tags.contains(&"dry-run") {
+        return false;
+    }
+    !serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|value| value.get("dry_run").and_then(|value| value.as_bool()))
+        .unwrap_or(false)
+}
+
 /// Parse a confidence score (0.0–1.0) from LLM response text.
 ///
 /// Looks for patterns like:
@@ -1312,5 +1388,18 @@ fn fallback_revise_strategy(retry_count: u32) -> String {
         1 => "Retrying with same parameters".to_string(),
         2 => "Retrying with adjusted parameters".to_string(),
         _ => "Escalating to stronger model".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::should_record_reliability;
+
+    #[test]
+    fn dry_run_requests_are_excluded_from_reliability() {
+        assert!(!should_record_reliability(r#"{"dry_run":true}"#, &[]));
+        assert!(!should_record_reliability("{}", &["dry-run", "safe"]));
+        assert!(should_record_reliability(r#"{"dry_run":false}"#, &[]));
+        assert!(should_record_reliability("{}", &[]));
     }
 }
