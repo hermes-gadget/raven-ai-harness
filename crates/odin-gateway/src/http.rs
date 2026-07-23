@@ -49,6 +49,8 @@ pub struct GatewayState {
     pub ws_manager: Option<Arc<crate::ws::WsConnectionManager>>,
     /// The live tool registry used by the task handler.
     pub tool_registry: Arc<odin_tools::ToolRegistry>,
+    /// Correlated tool-call approval gate exposed by the approval API.
+    pub approval_gate: Option<Arc<odin_permissions::ApprovalGate>>,
 }
 
 impl Default for GatewayState {
@@ -62,6 +64,7 @@ impl Default for GatewayState {
             total_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             ws_manager: None,
             tool_registry: Arc::new(build_tool_registry(None)),
+            approval_gate: None,
         }
     }
 }
@@ -200,6 +203,21 @@ pub struct DoctorReportResponse {
     pub warnings: usize,
     pub tool_checks: Vec<odin_tools::ToolDoctorCheck>,
     pub ecosystem_checks: Vec<odin_tools::EcosystemCheck>,
+}
+
+/// Operator decision for a correlated pending tool call.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalDecisionRequest {
+    pub approved: bool,
+    /// Must match the fingerprint returned with the pending request.
+    pub argument_fingerprint: String,
+}
+
+/// Result of applying an approval decision.
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalDecisionResponse {
+    pub request_id: String,
+    pub status: odin_permissions::ApprovalStatus,
 }
 
 // ── Route Handlers ───────────────────────────────────────────────────
@@ -606,6 +624,65 @@ async fn tools_doctor_handler(state: Arc<GatewayState>) -> Json<DoctorReportResp
     })
 }
 
+/// GET /approvals — list redacted pending tool-call approvals.
+async fn approvals_list_handler(
+    state: Arc<GatewayState>,
+) -> Json<Vec<odin_permissions::ApprovalRequest>> {
+    match state.approval_gate.as_ref() {
+        Some(gate) => Json(gate.pending_requests().await),
+        None => Json(Vec::new()),
+    }
+}
+
+/// POST /approvals/:id — approve or deny one exact pending call.
+async fn approval_decision_handler(
+    state: Arc<GatewayState>,
+    Path(request_id): Path<String>,
+    Json(decision): Json<ApprovalDecisionRequest>,
+) -> impl IntoResponse {
+    let Some(gate) = state.approval_gate.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "approval responder is not configured"})),
+        )
+            .into_response();
+    };
+    let Some(request) = gate.get_request(&request_id).await else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "approval request not found"})),
+        )
+            .into_response();
+    };
+    if request.status != odin_permissions::ApprovalStatus::Pending {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "approval request is no longer pending"})),
+        )
+            .into_response();
+    }
+
+    let accepted = if decision.approved {
+        gate.approve(&request_id, &decision.argument_fingerprint)
+            .await
+            .unwrap_or(false)
+    } else {
+        gate.deny(&request_id).await.unwrap_or(false)
+    };
+    let status = gate
+        .get_request(&request_id)
+        .await
+        .map(|request| request.status)
+        .unwrap_or(odin_permissions::ApprovalStatus::Denied);
+    let response = ApprovalDecisionResponse { request_id, status };
+
+    if accepted {
+        (StatusCode::OK, Json(response)).into_response()
+    } else {
+        (StatusCode::CONFLICT, Json(response)).into_response()
+    }
+}
+
 // ── Server ───────────────────────────────────────────────────────────
 
 /// Run the HTTP server on the given address with graceful shutdown.
@@ -620,10 +697,22 @@ pub async fn run_http_server(
     ws_manager: Option<Arc<crate::ws::WsConnectionManager>>,
     tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
 ) -> OdinResult<()> {
+    run_http_server_with_approvals(addr, task_handler, ws_manager, tool_registry, None).await
+}
+
+/// Run the HTTP server with a responder for correlated tool-call approvals.
+pub async fn run_http_server_with_approvals(
+    addr: &str,
+    task_handler: Option<TaskHandlerFn>,
+    ws_manager: Option<Arc<crate::ws::WsConnectionManager>>,
+    tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
+    approval_gate: Option<Arc<odin_permissions::ApprovalGate>>,
+) -> OdinResult<()> {
     let state: Arc<GatewayState> = Arc::new(GatewayState {
         task_handler,
         ws_manager,
         tool_registry: tool_registry.unwrap_or_else(|| Arc::new(build_tool_registry(None))),
+        approval_gate,
         ..Default::default()
     });
     let start_time = Arc::new(std::time::Instant::now());
@@ -1155,6 +1244,20 @@ pub fn build_router(state: Arc<GatewayState>, start_time: Arc<std::time::Instant
             }),
         )
         .route(
+            "/approvals",
+            get({
+                let st = state.clone();
+                move || approvals_list_handler(st.clone())
+            }),
+        )
+        .route(
+            "/approvals/{id}",
+            post({
+                let st = state.clone();
+                move |path, body| approval_decision_handler(st.clone(), path, body)
+            }),
+        )
+        .route(
             "/orchestrate",
             post({
                 let st = state.clone();
@@ -1375,5 +1478,67 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("shell"));
         assert!(json.contains("dangerous"));
+    }
+
+    #[tokio::test]
+    async fn remote_approval_handler_approves_correlated_call() {
+        let gate = Arc::new(odin_permissions::ApprovalGate::new(false, 30));
+        let request = gate
+            .submit_request(
+                uuid::Uuid::new_v4(),
+                "shell".into(),
+                r#"{"command":"echo ok"}"#.into(),
+            )
+            .await;
+        let state = Arc::new(GatewayState {
+            approval_gate: Some(gate.clone()),
+            ..Default::default()
+        });
+
+        let response = approval_decision_handler(
+            state,
+            Path(request.id.clone()),
+            Json(ApprovalDecisionRequest {
+                approved: true,
+                argument_fingerprint: request.argument_fingerprint,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            gate.get_request(&request.id).await.unwrap().status,
+            odin_permissions::ApprovalStatus::Approved
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_approval_handler_denies_correlated_call() {
+        let gate = Arc::new(odin_permissions::ApprovalGate::new(false, 30));
+        let request = gate
+            .submit_request(uuid::Uuid::new_v4(), "file_write".into(), "{}".into())
+            .await;
+        let state = Arc::new(GatewayState {
+            approval_gate: Some(gate.clone()),
+            ..Default::default()
+        });
+
+        let response = approval_decision_handler(
+            state,
+            Path(request.id.clone()),
+            Json(ApprovalDecisionRequest {
+                approved: false,
+                argument_fingerprint: request.argument_fingerprint,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            gate.get_request(&request.id).await.unwrap().status,
+            odin_permissions::ApprovalStatus::Denied
+        );
     }
 }

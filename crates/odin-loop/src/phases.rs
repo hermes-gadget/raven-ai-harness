@@ -405,6 +405,7 @@ impl Phase for ActPhase {
                                 // calling any tool implementation.
                                 let policy_error = if let Some(ref policy) = context.policy_engine {
                                     let mut error = None;
+                                    let mut approval_granted = false;
 
                                     match policy
                                         .check_rate_limit(tool_context.agent_id, &tool_name)
@@ -457,7 +458,7 @@ impl Phase for ActPhase {
                                             )
                                             .await
                                         {
-                                            Ok(true) => {}
+                                            Ok(true) => approval_granted = true,
                                             Ok(false) => {
                                                 error = Some(format!(
                                                     "Approval required for tool '{tool_name}', but the action was not approved"
@@ -472,6 +473,7 @@ impl Phase for ActPhase {
 
                                     if error.is_none()
                                         && tool_name == "shell"
+                                        && !approval_granted
                                         && let Some(command) =
                                             args.get("command").and_then(|value| value.as_str())
                                         && matches!(

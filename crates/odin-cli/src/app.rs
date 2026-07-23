@@ -37,6 +37,85 @@ struct AgentTaskSet {
     agents_by_task: std::collections::HashMap<tokio::task::Id, uuid::Uuid>,
 }
 
+/// Owns the terminal approval responder for the lifetime of a CLI run.
+struct CliApprovalResponder {
+    gate: Arc<odin_permissions::ApprovalGate>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl CliApprovalResponder {
+    fn spawn(gate: Arc<odin_permissions::ApprovalGate>) -> Self {
+        let mut requests = gate.subscribe();
+        let responder_gate = gate.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let request = match requests.recv().await {
+                    Ok(request) => request,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        responder_gate.disconnect();
+                        break;
+                    }
+                };
+
+                let current = responder_gate.get_request(&request.id).await;
+                if !current.is_some_and(|current| {
+                    current.status == odin_permissions::ApprovalStatus::Pending
+                }) {
+                    continue;
+                }
+
+                let prompt_request = request.clone();
+                let decision = tokio::task::spawn_blocking(move || {
+                    use std::io::Write;
+
+                    println!();
+                    println!("Approval required [{}]", prompt_request.id);
+                    println!("Action: {}", prompt_request.action);
+                    println!("Arguments: {}", prompt_request.details);
+                    print!("Approve this exact call? [y/N] ");
+                    if std::io::stdout().flush().is_err() {
+                        return None;
+                    }
+                    let mut input = String::new();
+                    match std::io::stdin().read_line(&mut input) {
+                        Ok(0) | Err(_) => None,
+                        Ok(_) => Some(matches!(
+                            input.trim().to_ascii_lowercase().as_str(),
+                            "y" | "yes"
+                        )),
+                    }
+                })
+                .await
+                .unwrap_or(Some(false));
+
+                match decision {
+                    Some(true) => {
+                        let _ = responder_gate
+                            .approve(&request.id, &request.argument_fingerprint)
+                            .await;
+                    }
+                    Some(false) => {
+                        let _ = responder_gate.deny(&request.id).await;
+                    }
+                    None => {
+                        responder_gate.disconnect();
+                        break;
+                    }
+                }
+            }
+        });
+        Self { gate, task }
+    }
+}
+
+impl Drop for CliApprovalResponder {
+    fn drop(&mut self) {
+        self.gate.disconnect();
+        self.task.abort();
+    }
+}
+
 impl AgentTaskSet {
     fn new() -> Self {
         Self {
@@ -616,14 +695,20 @@ async fn cmd_run(
     let provider: Arc<dyn odin_core::traits::Provider> =
         odin_providers::create_provider(&provider_cfg)?;
 
-    // Create the policy engine from safety config
-    let policy_engine = Arc::new(odin_permissions::PolicyEngine::new(
-        config.safety.permissions.clone(),
-        &config.safety.dangerous_commands,
-        config.tools.path_boundary.clone(),
-        config.safety.max_rate_per_minute,
-        config.safety.require_approval,
-    ));
+    let audit_logger = Arc::new(build_audit_logger(&config));
+    let approval_gate = Arc::new(odin_permissions::ApprovalGate::default());
+    let policy_engine = Arc::new(
+        odin_permissions::PolicyEngine::new(
+            config.safety.permissions.clone(),
+            &config.safety.dangerous_commands,
+            config.tools.path_boundary.clone(),
+            config.safety.max_rate_per_minute,
+            config.safety.require_approval,
+        )
+        .with_approval_gate(approval_gate.clone())
+        .with_audit_logger(audit_logger.clone()),
+    );
+    let _approval_responder = CliApprovalResponder::spawn(approval_gate);
     tracing::info!("[CLI] Policy engine initialized");
 
     // ── Shared resources (used by both orchestrated and direct paths) ──
@@ -1812,14 +1897,19 @@ async fn cmd_serve(addr: Option<String>, config_path: Option<PathBuf>) -> anyhow
     let sandbox = Arc::new(odin_tools::Sandbox::new(config.tools.path_boundary.clone()));
     let enabled_tools = config.tools.effective_enabled_tools();
 
-    // Create the policy engine from safety config
-    let policy_engine = Arc::new(odin_permissions::PolicyEngine::new(
-        config.safety.permissions.clone(),
-        &config.safety.dangerous_commands,
-        config.tools.path_boundary.clone(),
-        config.safety.max_rate_per_minute,
-        config.safety.require_approval,
-    ));
+    let audit_logger = Arc::new(build_audit_logger(&config));
+    let approval_gate = Arc::new(odin_permissions::ApprovalGate::default());
+    let policy_engine = Arc::new(
+        odin_permissions::PolicyEngine::new(
+            config.safety.permissions.clone(),
+            &config.safety.dangerous_commands,
+            config.tools.path_boundary.clone(),
+            config.safety.max_rate_per_minute,
+            config.safety.require_approval,
+        )
+        .with_approval_gate(approval_gate.clone())
+        .with_audit_logger(audit_logger.clone()),
+    );
     tracing::info!("[CLI/serve] Policy engine initialized");
 
     let tool_registry = Arc::new(build_tool_registry_with(sandbox, Some(&enabled_tools)));
@@ -2018,9 +2108,14 @@ async fn cmd_serve(addr: Option<String>, config_path: Option<PathBuf>) -> anyhow
     println!();
 
     let ws_manager = Arc::new(odin_gateway::ws::WsConnectionManager::new(256));
-    let server_result =
-        odin_gateway::run_http_server(&addr, Some(handler), Some(ws_manager), Some(tool_registry))
-            .await;
+    let server_result = odin_gateway::run_http_server_with_approvals(
+        &addr,
+        Some(handler),
+        Some(ws_manager),
+        Some(tool_registry),
+        Some(approval_gate),
+    )
+    .await;
 
     if let Some(gateway) = discord_gateway
         && let Err(error) = gateway.stop().await
