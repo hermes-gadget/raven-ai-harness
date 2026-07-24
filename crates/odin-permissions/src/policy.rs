@@ -9,7 +9,11 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use odin_core::error::{OdinError, OdinResult};
-use odin_core::types::{AgentId, PathBoundary, PermissionAction, PermissionRule};
+use odin_core::traits::AuditLogger;
+use odin_core::types::{
+    AgentId, AuditEntry, AuditEventType, AuditResult, PathBoundary, PermissionAction,
+    PermissionRule,
+};
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,6 +69,10 @@ pub struct PolicyEngine {
     default_max_rate: u32,
     /// Whether to require approval by default.
     require_approval: bool,
+    /// Connected interactive approval responder, if any.
+    approval_gate: Option<Arc<crate::approval::ApprovalGate>>,
+    /// Optional audit sink for approval lifecycle decisions.
+    audit_logger: Option<Arc<dyn AuditLogger>>,
 }
 
 impl PolicyEngine {
@@ -103,7 +111,21 @@ impl PolicyEngine {
             rate_trackers: Arc::new(RwLock::new(HashMap::new())),
             default_max_rate,
             require_approval,
+            approval_gate: None,
+            audit_logger: None,
         }
+    }
+
+    /// Connect an interactive approval gate.
+    pub fn with_approval_gate(mut self, gate: Arc<crate::approval::ApprovalGate>) -> Self {
+        self.approval_gate = Some(gate);
+        self
+    }
+
+    /// Connect an audit logger for approval decisions.
+    pub fn with_audit_logger(mut self, logger: Arc<dyn AuditLogger>) -> Self {
+        self.audit_logger = Some(logger);
+        self
     }
 
     /// Check if a shell command matches any dangerous pattern.
@@ -289,27 +311,102 @@ impl odin_core::traits::PermissionEngine for PolicyEngine {
     /// Request user approval for an action.
     async fn request_approval(
         &self,
-        _agent_id: AgentId,
+        agent_id: AgentId,
         action: &str,
         details: &str,
     ) -> OdinResult<bool> {
-        // In the current implementation, we log and deny by default.
-        // A real implementation would prompt via the gateway.
         let redactor = crate::redact::SecretRedactor::full();
+        let Some(gate) = self.approval_gate.as_ref() else {
+            warn!(
+                action = %redactor.redact(action),
+                details = %redactor.redact(details),
+                "Approval requested but no approval responder is connected; denying"
+            );
+            return Ok(false);
+        };
+
+        let (request, status) = gate
+            .request(agent_id, action.to_owned(), details.to_owned())
+            .await;
+        let approved = status == crate::approval::ApprovalStatus::Approved;
+
+        if let Some(logger) = self.audit_logger.as_ref() {
+            // Redact here as well as at the durable audit boundary so custom
+            // AuditLogger implementations never receive raw approval details.
+            let entry = AuditEntry {
+                id: uuid::Uuid::new_v4(),
+                timestamp: Utc::now(),
+                agent_id,
+                session_id: uuid::Uuid::default(),
+                event_type: AuditEventType::PermissionCheck,
+                action: redactor.redact(action),
+                details: serde_json::json!({
+                    "request_id": request.id,
+                    "details": redactor.redact(details),
+                    "argument_fingerprint": request.argument_fingerprint,
+                    "status": status,
+                }),
+                result: if approved {
+                    AuditResult::Success
+                } else {
+                    AuditResult::Denied
+                },
+            };
+            if let Err(error) = logger.log(entry).await {
+                warn!(error = %error, "Failed to write approval audit record");
+            }
+        }
+
         warn!(
             action = %redactor.redact(action),
             details = %redactor.redact(details),
-            "Approval requested but no approval responder is connected; denying"
+            ?status,
+            "Approval request completed"
         );
-        Ok(false)
+        Ok(approved)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use odin_core::traits::PermissionEngine;
+    use odin_core::traits::{AuditLogger, PermissionEngine};
     use uuid::Uuid;
+
+    #[derive(Default)]
+    struct CaptureAuditLogger {
+        entries: tokio::sync::Mutex<Vec<AuditEntry>>,
+    }
+
+    #[async_trait]
+    impl AuditLogger for CaptureAuditLogger {
+        async fn log(&self, entry: AuditEntry) -> OdinResult<()> {
+            self.entries.lock().await.push(entry);
+            Ok(())
+        }
+
+        async fn query(
+            &self,
+            _agent_id: Option<AgentId>,
+            _session_id: Option<odin_core::types::SessionId>,
+            _event_type: Option<AuditEventType>,
+            limit: usize,
+        ) -> OdinResult<Vec<AuditEntry>> {
+            Ok(self
+                .entries
+                .lock()
+                .await
+                .iter()
+                .rev()
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        async fn recent(&self, limit: usize) -> OdinResult<Vec<AuditEntry>> {
+            self.query(None, None, None, limit).await
+        }
+    }
 
     fn test_agent() -> AgentId {
         Uuid::new_v4()
@@ -386,6 +483,41 @@ mod tests {
         // Safe command should be allowed
         let result = engine.check_command(agent, "ls -la").await.unwrap();
         assert_eq!(result, PermissionAction::Allow);
+    }
+
+    #[tokio::test]
+    async fn approval_audit_record_is_redacted() {
+        let gate = Arc::new(crate::approval::ApprovalGate::new(false, 30));
+        let logger = Arc::new(CaptureAuditLogger::default());
+        let engine = Arc::new(
+            PolicyEngine::new(vec![], &[], PathBoundary::default(), 60, true)
+                .with_approval_gate(gate.clone())
+                .with_audit_logger(logger.clone()),
+        );
+        let mut requests = gate.subscribe();
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+        let details = format!(r#"{{"token":"{secret}","email":"user@example.com"}}"#);
+        let waiter = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                engine
+                    .request_approval(test_agent(), "shell", &details)
+                    .await
+                    .unwrap()
+            })
+        };
+
+        let request = requests.recv().await.unwrap();
+        gate.approve(&request.id, &request.argument_fingerprint)
+            .await
+            .unwrap();
+        assert!(waiter.await.unwrap());
+
+        let entries = logger.recent(1).await.unwrap();
+        let serialized = serde_json::to_string(&entries[0]).unwrap();
+        assert!(!serialized.contains(secret));
+        assert!(!serialized.contains("user@example.com"));
+        assert!(serialized.contains("[REDACTED:"));
     }
 
     #[tokio::test]

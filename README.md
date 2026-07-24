@@ -102,6 +102,23 @@ MCP tools are treated as unsafe and approval-required by default. A server can o
 
 Run **raven &lt;command&gt; --help** for arguments.
 
+Approval-required model tool calls in **raven run** display the redacted tool
+name and arguments in the terminal and accept `y`/`yes`; every other response
+denies the call. EOF/disconnect and the 30-second timeout also deny it.
+
+When using **raven serve**, a remote operator can list redacted pending calls
+with **GET /approvals** and decide one with **POST /approvals/&lt;request-id&gt;**:
+
+~~~json
+{
+  "approved": true,
+  "argument_fingerprint": "<fingerprint returned by GET /approvals>"
+}
+~~~
+
+The fingerprint binds approval to the exact original tool name and arguments.
+A mismatched fingerprint invalidates and denies the pending call.
+
 ## Terminal UI
 
 **raven** opens a chat-first terminal UI with an always-visible orchestration side panel on normal terminal widths:
@@ -172,6 +189,9 @@ More detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 - Tool execution goes through rate limits, explicit allow/deny rules, approval requirements, command checks, and path boundaries.
 - Calls fail closed when an approval-required tool has no approval responder.
+- CLI and HTTP approval requests expire after 30 seconds; responder and task
+  disconnects deny their pending calls.
+- Approval request displays and permission-check audit entries are redacted.
 - Direct dangerous-tool testing requires **--approve**.
 - Unknown MCP tools are unsafe and approval-required by default.
 - Tool results, TUI logs, configuration display, and audit entries redact supported secret and PII patterns.
@@ -183,7 +203,9 @@ More detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 - The TUI controls runs it starts in-process. **raven orchestrate pause/resume/cancel** still update persistent markers only and do not signal a separate process.
 - The HTTP and Discord orchestration submission endpoints create persisted plans. Task execution is available through **raven run**, HTTP **/chat**, and Discord **/raven run**.
 - **raven serve** also starts Discord when **gateway.discord_enabled** is true and a token is available from the configured value or environment variable.
-- The model loop still has no general interactive tool-call approval responder. The TUI currently approval-gates dangerous TUI actions such as cancellation; approval-required tool calls are denied unless policy explicitly allows them or approval requirements are disabled for a trusted environment.
+- The TUI currently approval-gates dangerous TUI actions such as cancellation,
+  but model-driven tool-call approval is connected only for **raven run** and
+  **raven serve**.
 - Scheduler definitions persist, but a separate long-running scheduler process is required to execute due jobs continuously.
 - WebSocket clients receive task/orchestration events, but inbound pause/resume/cancel control messages are not dispatched.
 - Memory is attached to the direct runtime path; orchestrated sub-agent memory retrieval is not yet integrated.

@@ -1,35 +1,43 @@
 //! Interactive approval gate for potentially dangerous operations.
 //!
-//! The [`ApprovalGate`] manages the lifecycle of an approval request,
-//! allowing an operator (human or automated) to approve or deny
-//! specific actions before they execute.
+//! Approval requests are correlated with a fingerprint of the exact action and
+//! arguments. Only redacted request details leave this crate.
 
+use chrono::{DateTime, Utc};
 use odin_core::error::OdinResult;
 use odin_core::types::AgentId;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::{broadcast, watch};
 use tracing::{debug, info, warn};
 
-/// A single pending approval request.
-#[derive(Debug, Clone)]
+/// A single approval request safe to display to an operator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     /// Unique request ID.
     pub id: String,
     /// The agent requesting approval.
     pub agent_id: AgentId,
-    /// Description of the action.
+    /// Redacted description of the action.
     pub action: String,
-    /// Detailed context about the action.
+    /// Redacted arguments or context for the action.
     pub details: String,
+    /// Fingerprint binding a decision to the original, unredacted arguments.
+    pub argument_fingerprint: String,
     /// Current status of the request.
     pub status: ApprovalStatus,
-    /// Number of times this has been re-requested.
-    pub retry_count: u32,
+    /// Time at which this request was created.
+    pub created_at: DateTime<Utc>,
+    /// Time at which this request will expire.
+    pub expires_at: DateTime<Utc>,
 }
 
 /// Status of an approval request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ApprovalStatus {
     /// Waiting for a response.
     Pending,
@@ -41,167 +49,318 @@ pub enum ApprovalStatus {
     Expired,
 }
 
-/// Manages interactive command/tool approval.
-///
-/// Implements a simple queue-based approval system where actions
-/// can be approved or denied asynchronously.
+struct PendingApproval {
+    request: ApprovalRequest,
+    decision_tx: watch::Sender<ApprovalStatus>,
+}
+
+struct ApprovalGateInner {
+    pending: Mutex<HashMap<String, PendingApproval>>,
+    auto_approve: Mutex<bool>,
+    timeout: Duration,
+    request_tx: broadcast::Sender<ApprovalRequest>,
+}
+
+/// Manages correlated interactive command/tool approval.
+#[derive(Clone)]
 pub struct ApprovalGate {
-    /// Pending approval requests.
-    pending: Arc<RwLock<HashMap<String, ApprovalRequest>>>,
-    /// Whether auto-approval is enabled (bypasses the gate).
-    auto_approve: Arc<RwLock<bool>>,
-    /// Timeout for pending requests in seconds.
-    timeout_secs: u64,
+    inner: Arc<ApprovalGateInner>,
 }
 
 impl ApprovalGate {
-    /// Create a new approval gate.
+    /// Create a new approval gate with a timeout in seconds.
     pub fn new(auto_approve: bool, timeout_secs: u64) -> Self {
+        Self::with_timeout(auto_approve, Duration::from_secs(timeout_secs))
+    }
+
+    /// Create a gate with an explicit timeout.
+    pub fn with_timeout(auto_approve: bool, timeout: Duration) -> Self {
+        let (request_tx, _) = broadcast::channel(256);
         Self {
-            pending: Arc::new(RwLock::new(HashMap::new())),
-            auto_approve: Arc::new(RwLock::new(auto_approve)),
-            timeout_secs,
+            inner: Arc::new(ApprovalGateInner {
+                pending: Mutex::new(HashMap::new()),
+                auto_approve: Mutex::new(auto_approve),
+                timeout,
+                request_tx,
+            }),
         }
     }
 
-    /// Submit a new approval request.
-    ///
-    /// Returns the request ID.
+    /// Subscribe to newly submitted requests.
+    pub fn subscribe(&self) -> broadcast::Receiver<ApprovalRequest> {
+        self.inner.request_tx.subscribe()
+    }
+
+    /// Fingerprint an action and its exact arguments.
+    pub fn fingerprint(action: &str, details: &str) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update((action.len() as u64).to_be_bytes());
+        hasher.update(action.as_bytes());
+        hasher.update((details.len() as u64).to_be_bytes());
+        hasher.update(details.as_bytes());
+        format!("{:x}", hasher.finalize())
+    }
+
+    /// Submit a new approval request and return its public, redacted form.
     pub async fn submit_request(
         &self,
         agent_id: AgentId,
         action: String,
         details: String,
-    ) -> String {
+    ) -> ApprovalRequest {
         let id = uuid::Uuid::new_v4().to_string();
+        let created_at = Utc::now();
+        let expires_at = created_at
+            + chrono::TimeDelta::from_std(self.inner.timeout).unwrap_or(chrono::TimeDelta::MAX);
+        let redactor = crate::redact::SecretRedactor::full();
         let request = ApprovalRequest {
             id: id.clone(),
             agent_id,
-            action,
-            details,
+            action: redactor.redact(&action),
+            details: redactor.redact(&details),
+            argument_fingerprint: Self::fingerprint(&action, &details),
             status: ApprovalStatus::Pending,
-            retry_count: 0,
+            created_at,
+            expires_at,
         };
+        let (decision_tx, _) = watch::channel(ApprovalStatus::Pending);
 
-        self.pending.write().await.insert(id.clone(), request);
+        self.inner
+            .pending
+            .lock()
+            .expect("approval gate lock poisoned")
+            .insert(
+                id.clone(),
+                PendingApproval {
+                    request: request.clone(),
+                    decision_tx,
+                },
+            );
+        let _ = self.inner.request_tx.send(request.clone());
         info!(request_id = %id, "Approval request submitted");
-        id
+        request
+    }
+
+    /// Submit and wait for a decision.
+    ///
+    /// Dropping this future (for example when a client disconnects) denies the
+    /// still-pending request.
+    pub async fn request(
+        &self,
+        agent_id: AgentId,
+        action: String,
+        details: String,
+    ) -> (ApprovalRequest, ApprovalStatus) {
+        let request = self.submit_request(agent_id, action, details).await;
+        let mut guard = PendingRequestGuard {
+            gate: self.clone(),
+            request_id: request.id.clone(),
+            armed: true,
+        };
+        let status = self.await_decision(&request.id).await;
+        guard.armed = false;
+        (request, status)
     }
 
     /// Wait for an approval decision on a request.
-    ///
-    /// Blocks until the request is approved, denied, or expired.
     pub async fn await_decision(&self, request_id: &str) -> ApprovalStatus {
-        // If auto-approve is on, immediately approve
-        if *self.auto_approve.read().await {
-            debug!(request_id = %request_id, "Auto-approving request");
-            return ApprovalStatus::Approved;
+        if *self
+            .inner
+            .auto_approve
+            .lock()
+            .expect("approval auto-approve lock poisoned")
+        {
+            let fingerprint = self
+                .get_request(request_id)
+                .await
+                .map(|request| request.argument_fingerprint);
+            if let Some(fingerprint) = fingerprint {
+                if self
+                    .approve(request_id, &fingerprint)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return ApprovalStatus::Approved;
+                }
+                return self
+                    .get_request(request_id)
+                    .await
+                    .map(|request| request.status)
+                    .unwrap_or(ApprovalStatus::Denied);
+            }
+            return ApprovalStatus::Denied;
         }
 
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_secs(self.timeout_secs);
+        let mut decision_rx = {
+            let pending = self
+                .inner
+                .pending
+                .lock()
+                .expect("approval gate lock poisoned");
+            let Some(entry) = pending.get(request_id) else {
+                return ApprovalStatus::Denied;
+            };
+            entry.decision_tx.subscribe()
+        };
 
-        loop {
-            if start.elapsed() > timeout {
+        let wait = async {
+            loop {
+                let status = *decision_rx.borrow_and_update();
+                if status != ApprovalStatus::Pending {
+                    return status;
+                }
+                if decision_rx.changed().await.is_err() {
+                    return ApprovalStatus::Denied;
+                }
+            }
+        };
+
+        match tokio::time::timeout(self.inner.timeout, wait).await {
+            Ok(status) => status,
+            Err(_) => {
                 warn!(request_id = %request_id, "Approval request timed out");
-                let mut pending = self.pending.write().await;
-                if let Some(req) = pending.get_mut(request_id) {
-                    req.status = ApprovalStatus::Expired;
-                }
-                return ApprovalStatus::Expired;
-            }
-
-            {
-                let pending = self.pending.read().await;
-                if let Some(req) = pending.get(request_id) {
-                    match req.status {
-                        ApprovalStatus::Approved => return ApprovalStatus::Approved,
-                        ApprovalStatus::Denied => return ApprovalStatus::Denied,
-                        ApprovalStatus::Expired => return ApprovalStatus::Expired,
-                        ApprovalStatus::Pending => {}
-                    }
+                if self.transition(request_id, ApprovalStatus::Expired) {
+                    ApprovalStatus::Expired
                 } else {
-                    return ApprovalStatus::Expired;
+                    self.get_request(request_id)
+                        .await
+                        .map(|request| request.status)
+                        .unwrap_or(ApprovalStatus::Denied)
                 }
             }
-
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
 
-    /// Approve a pending request.
-    pub async fn approve(&self, request_id: &str) -> OdinResult<bool> {
-        let mut pending = self.pending.write().await;
-        if let Some(req) = pending.get_mut(request_id) {
-            if req.status == ApprovalStatus::Pending {
-                req.status = ApprovalStatus::Approved;
-                info!(request_id = %request_id, "Request approved");
-                return Ok(true);
-            }
-            warn!(
-                request_id = %request_id,
-                status = ?req.status,
-                "Request is not in pending state"
-            );
-            Ok(false)
-        } else {
-            warn!(request_id = %request_id, "Request not found");
-            Ok(false)
+    /// Approve a pending request if the supplied argument fingerprint matches.
+    ///
+    /// A mismatch invalidates and denies the request.
+    pub async fn approve(&self, request_id: &str, argument_fingerprint: &str) -> OdinResult<bool> {
+        let matches = self
+            .get_request(request_id)
+            .await
+            .filter(|request| request.status == ApprovalStatus::Pending)
+            .is_some_and(|request| request.argument_fingerprint == argument_fingerprint);
+        if !matches {
+            warn!(request_id = %request_id, "Approval fingerprint mismatch or request is not pending");
+            self.transition(request_id, ApprovalStatus::Denied);
+            return Ok(false);
         }
+
+        let changed = self.transition(request_id, ApprovalStatus::Approved);
+        if changed {
+            info!(request_id = %request_id, "Request approved");
+        }
+        Ok(changed)
     }
 
     /// Deny a pending request.
     pub async fn deny(&self, request_id: &str) -> OdinResult<bool> {
-        let mut pending = self.pending.write().await;
-        if let Some(req) = pending.get_mut(request_id) {
-            if req.status == ApprovalStatus::Pending {
-                req.status = ApprovalStatus::Denied;
-                info!(request_id = %request_id, "Request denied");
-                return Ok(true);
-            }
-            Ok(false)
-        } else {
-            warn!(request_id = %request_id, "Request not found");
-            Ok(false)
-        }
+        Ok(self.transition(request_id, ApprovalStatus::Denied))
+    }
+
+    /// Deny every pending request, such as when a responder disconnects.
+    pub fn disconnect(&self) -> usize {
+        let ids: Vec<String> = self
+            .inner
+            .pending
+            .lock()
+            .expect("approval gate lock poisoned")
+            .iter()
+            .filter(|(_, entry)| entry.request.status == ApprovalStatus::Pending)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.iter()
+            .filter(|id| self.transition(id, ApprovalStatus::Denied))
+            .count()
     }
 
     /// Get all pending requests.
     pub async fn pending_requests(&self) -> Vec<ApprovalRequest> {
-        let pending = self.pending.read().await;
-        pending
+        self.inner
+            .pending
+            .lock()
+            .expect("approval gate lock poisoned")
             .values()
-            .filter(|r| r.status == ApprovalStatus::Pending)
-            .cloned()
+            .filter(|entry| entry.request.status == ApprovalStatus::Pending)
+            .map(|entry| entry.request.clone())
             .collect()
     }
 
     /// Get a specific request by ID.
     pub async fn get_request(&self, request_id: &str) -> Option<ApprovalRequest> {
-        self.pending.read().await.get(request_id).cloned()
+        self.inner
+            .pending
+            .lock()
+            .expect("approval gate lock poisoned")
+            .get(request_id)
+            .map(|entry| entry.request.clone())
     }
 
     /// Set auto-approve mode.
     pub async fn set_auto_approve(&self, enabled: bool) {
-        *self.auto_approve.write().await = enabled;
+        *self
+            .inner
+            .auto_approve
+            .lock()
+            .expect("approval auto-approve lock poisoned") = enabled;
         info!(auto_approve = enabled, "Auto-approve mode changed");
     }
 
     /// Check if auto-approve is enabled.
     pub async fn is_auto_approve(&self) -> bool {
-        *self.auto_approve.read().await
+        *self
+            .inner
+            .auto_approve
+            .lock()
+            .expect("approval auto-approve lock poisoned")
     }
 
-    /// Clean up expired requests.
+    /// Remove completed requests.
     pub async fn cleanup_expired(&self) -> usize {
-        let mut pending = self.pending.write().await;
+        let mut pending = self
+            .inner
+            .pending
+            .lock()
+            .expect("approval gate lock poisoned");
         let before = pending.len();
-        pending.retain(|_, req| req.status == ApprovalStatus::Pending);
+        pending.retain(|_, entry| entry.request.status == ApprovalStatus::Pending);
         let cleaned = before - pending.len();
         if cleaned > 0 {
-            debug!(count = cleaned, "Cleaned up expired approval requests");
+            debug!(count = cleaned, "Cleaned up completed approval requests");
         }
         cleaned
+    }
+
+    fn transition(&self, request_id: &str, status: ApprovalStatus) -> bool {
+        let mut pending = self
+            .inner
+            .pending
+            .lock()
+            .expect("approval gate lock poisoned");
+        let Some(entry) = pending.get_mut(request_id) else {
+            return false;
+        };
+        if entry.request.status != ApprovalStatus::Pending {
+            return false;
+        }
+        entry.request.status = status;
+        entry.decision_tx.send_replace(status);
+        true
+    }
+}
+
+struct PendingRequestGuard {
+    gate: ApprovalGate,
+    request_id: String,
+    armed: bool,
+}
+
+impl Drop for PendingRequestGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.gate
+                .transition(&self.request_id, ApprovalStatus::Denied);
+        }
     }
 }
 
@@ -216,89 +375,140 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    #[tokio::test]
-    async fn test_submit_and_approve() {
-        let gate = ApprovalGate::new(false, 30);
-        let agent_id = Uuid::new_v4();
-
-        let id = gate
-            .submit_request(agent_id, "shell:rm -rf /".into(), "Remove root".into())
-            .await;
-
-        assert!(gate.approve(&id).await.unwrap());
-
-        let status = gate.await_decision(&id).await;
-        assert_eq!(status, ApprovalStatus::Approved);
+    async fn request(gate: &ApprovalGate, details: &str) -> ApprovalRequest {
+        gate.submit_request(Uuid::new_v4(), "shell".into(), details.into())
+            .await
     }
 
     #[tokio::test]
-    async fn test_submit_and_deny() {
+    async fn approves_matching_request() {
         let gate = ApprovalGate::new(false, 30);
-        let agent_id = Uuid::new_v4();
-
-        let id = gate
-            .submit_request(agent_id, "shell:rm -rf /".into(), "Remove root".into())
-            .await;
-
-        assert!(gate.deny(&id).await.unwrap());
-
-        let status = gate.await_decision(&id).await;
-        assert_eq!(status, ApprovalStatus::Denied);
+        let request = request(&gate, r#"{"command":"echo ok"}"#).await;
+        assert!(
+            gate.approve(&request.id, &request.argument_fingerprint)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            gate.await_decision(&request.id).await,
+            ApprovalStatus::Approved
+        );
     }
 
     #[tokio::test]
-    async fn test_auto_approve() {
+    async fn denies_request() {
+        let gate = ApprovalGate::new(false, 30);
+        let request = request(&gate, "{}").await;
+        assert!(gate.deny(&request.id).await.unwrap());
+        assert_eq!(
+            gate.await_decision(&request.id).await,
+            ApprovalStatus::Denied
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_approve_completes_request() {
         let gate = ApprovalGate::new(true, 30);
-        let agent_id = Uuid::new_v4();
-
-        let id = gate
-            .submit_request(agent_id, "test".into(), "test".into())
-            .await;
-
-        // With auto-approve, await_decision should return Approved immediately
-        let status = gate.await_decision(&id).await;
-        assert_eq!(status, ApprovalStatus::Approved);
+        let request = request(&gate, "{}").await;
+        assert_eq!(
+            gate.await_decision(&request.id).await,
+            ApprovalStatus::Approved
+        );
     }
 
     #[tokio::test]
-    async fn test_timeout() {
-        let gate = ApprovalGate::new(false, 1); // 1 second timeout
-        let agent_id = Uuid::new_v4();
-
-        let id = gate
-            .submit_request(agent_id, "test".into(), "test".into())
-            .await;
-
-        let status = gate.await_decision(&id).await;
-        assert_eq!(status, ApprovalStatus::Expired);
+    async fn expires_request() {
+        let gate = ApprovalGate::with_timeout(false, Duration::from_millis(10));
+        let request = request(&gate, "{}").await;
+        assert_eq!(
+            gate.await_decision(&request.id).await,
+            ApprovalStatus::Expired
+        );
     }
 
     #[tokio::test]
-    async fn test_pending_requests() {
+    async fn changed_arguments_invalidate_approval() {
         let gate = ApprovalGate::new(false, 30);
-        let agent_id = Uuid::new_v4();
-
-        gate.submit_request(agent_id, "action1".into(), "desc1".into())
-            .await;
-        gate.submit_request(agent_id, "action2".into(), "desc2".into())
-            .await;
-
-        let pending = gate.pending_requests().await;
-        assert_eq!(pending.len(), 2);
+        let request = request(&gate, r#"{"command":"echo safe"}"#).await;
+        let changed = ApprovalGate::fingerprint("shell", r#"{"command":"rm -rf /"}"#);
+        assert!(!gate.approve(&request.id, &changed).await.unwrap());
+        assert_eq!(
+            gate.await_decision(&request.id).await,
+            ApprovalStatus::Denied
+        );
     }
 
     #[tokio::test]
-    async fn test_cleanup() {
+    async fn concurrent_requests_are_correlated() {
         let gate = ApprovalGate::new(false, 30);
-        let agent_id = Uuid::new_v4();
+        let first = request(&gate, r#"{"command":"first"}"#).await;
+        let second = request(&gate, r#"{"command":"second"}"#).await;
 
-        let id = gate
-            .submit_request(agent_id, "test".into(), "test".into())
-            .await;
-        gate.approve(&id).await.unwrap();
+        gate.approve(&second.id, &second.argument_fingerprint)
+            .await
+            .unwrap();
+        gate.deny(&first.id).await.unwrap();
 
-        // After approval, cleanup removes the completed request
-        let cleaned = gate.cleanup_expired().await;
-        assert_eq!(cleaned, 1);
+        let (first_status, second_status) = tokio::join!(
+            gate.await_decision(&first.id),
+            gate.await_decision(&second.id)
+        );
+        assert_eq!(first_status, ApprovalStatus::Denied);
+        assert_eq!(second_status, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test]
+    async fn disconnect_denies_pending_requests() {
+        let gate = ApprovalGate::new(false, 30);
+        let first = request(&gate, "{}").await;
+        let second = request(&gate, "{}").await;
+        assert_eq!(gate.disconnect(), 2);
+        assert_eq!(gate.await_decision(&first.id).await, ApprovalStatus::Denied);
+        assert_eq!(
+            gate.await_decision(&second.id).await,
+            ApprovalStatus::Denied
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_waiter_denies_request() {
+        let gate = ApprovalGate::new(false, 30);
+        let mut requests = gate.subscribe();
+        let waiter = {
+            let gate = gate.clone();
+            tokio::spawn(async move {
+                gate.request(Uuid::new_v4(), "shell".into(), "{}".into())
+                    .await
+            })
+        };
+        let request = requests.recv().await.unwrap();
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(
+            gate.get_request(&request.id).await.unwrap().status,
+            ApprovalStatus::Denied
+        );
+    }
+
+    #[tokio::test]
+    async fn request_details_are_redacted() {
+        let gate = ApprovalGate::new(false, 30);
+        let secret = "ghp_abcdefghijklmnopqrstuvwxyz123456";
+        let request = request(
+            &gate,
+            &format!(r#"{{"token":"{secret}","email":"user@example.com"}}"#),
+        )
+        .await;
+        assert!(!request.details.contains(secret));
+        assert!(!request.details.contains("user@example.com"));
+        assert!(request.details.contains("[REDACTED:"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_completed_requests() {
+        let gate = ApprovalGate::new(false, 30);
+        let request = request(&gate, "{}").await;
+        gate.deny(&request.id).await.unwrap();
+        assert_eq!(gate.cleanup_expired().await, 1);
     }
 }

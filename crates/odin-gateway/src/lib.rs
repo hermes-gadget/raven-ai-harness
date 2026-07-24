@@ -10,8 +10,9 @@ pub mod ws;
 pub use discord::DiscordConfig;
 pub use discord::DiscordGateway;
 pub use http::{
-    ChatRequest, ChatResponse, DoctorReportResponse, GatewayState, HealthDependencies,
-    HealthResponse, LockSummary, MetricsResponse, OrchestrateRequest, OrchestrateResponse,
-    OrchestrateStatusResponse, OrchestrateTaskInfo, TaskHandlerFn, ToolInfo, ToolsListResponse,
-    ValidationReportResponse, build_router, run_http_server,
+    ApprovalDecisionRequest, ApprovalDecisionResponse, ChatRequest, ChatResponse,
+    DoctorReportResponse, GatewayState, HealthDependencies, HealthResponse, LockSummary,
+    MetricsResponse, OrchestrateRequest, OrchestrateResponse, OrchestrateStatusResponse,
+    OrchestrateTaskInfo, TaskHandlerFn, ToolInfo, ToolsListResponse, ValidationReportResponse,
+    build_router, run_http_server, run_http_server_with_approvals,
 };
