@@ -43,6 +43,8 @@ pub struct Engine {
     skill_registry: Option<Arc<odin_skills::SkillRegistry>>,
     /// Optional audit logger for recording tool calls and events
     audit_logger: Option<Arc<dyn AuditLogger>>,
+    /// Optional persistent reliability tracker for production tool attempts.
+    reliability_tracker: Option<Arc<odin_tools::ReliabilityTracker>>,
     /// Model name to pass to the provider (e.g., "deepseek-v4-pro", "gpt-4o")
     model_name: String,
     /// Optional small/local model profile used to bound prompts, retries, and context.
@@ -63,6 +65,7 @@ impl Engine {
             policy_engine: None,
             skill_registry: None,
             audit_logger: None,
+            reliability_tracker: None,
             model_name: String::new(),
             model_profile: None,
         }
@@ -113,6 +116,15 @@ impl Engine {
     /// Attach an audit logger for recording tool calls and events.
     pub fn with_audit_logger(mut self, logger: Arc<dyn AuditLogger>) -> Self {
         self.audit_logger = Some(logger);
+        self
+    }
+
+    /// Attach the shared persistent tracker used by CLI and TUI surfaces.
+    pub fn with_reliability_tracker(
+        mut self,
+        tracker: Arc<odin_tools::ReliabilityTracker>,
+    ) -> Self {
+        self.reliability_tracker = Some(tracker);
         self
     }
 
@@ -202,6 +214,7 @@ impl LoopEngineTrait for Engine {
             policy_engine: self.policy_engine.clone(),
             skill_registry: self.skill_registry.clone(),
             audit_logger: self.audit_logger.clone(),
+            reliability_tracker: self.reliability_tracker.clone(),
             model_profile: self.model_profile.clone(),
         };
 
@@ -366,6 +379,7 @@ impl LoopEngineTrait for Engine {
             policy_engine: self.policy_engine.clone(),
             skill_registry: self.skill_registry.clone(),
             audit_logger: self.audit_logger.clone(),
+            reliability_tracker: self.reliability_tracker.clone(),
             model_profile: self.model_profile.clone(),
         };
 

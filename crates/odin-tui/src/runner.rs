@@ -177,6 +177,7 @@ struct ExecutionResources {
     policy_engine: Option<Arc<odin_permissions::PolicyEngine>>,
     tool_registry: Option<Arc<odin_tools::ToolRegistry>>,
     audit_logger: Option<Arc<dyn AuditLogger>>,
+    reliability_tracker: Option<Arc<odin_tools::ReliabilityTracker>>,
     model_name: String,
 }
 
@@ -212,6 +213,11 @@ impl ExecutionResources {
         load_mcp_tools(&tool_registry, &config).await;
 
         let audit_logger: Arc<dyn AuditLogger> = Arc::new(build_audit_logger(&config));
+        let reliability_path = configured_data_dir(&config).join("reliability.db");
+        let reliability_tracker = Arc::new(odin_tools::ReliabilityTracker::persistent(
+            &reliability_path,
+            odin_tools::ReliabilityConfig::default(),
+        )?);
         let model_name = config
             .models
             .default_model
@@ -224,6 +230,7 @@ impl ExecutionResources {
             policy_engine: Some(policy_engine),
             tool_registry: Some(tool_registry),
             audit_logger: Some(audit_logger),
+            reliability_tracker: Some(reliability_tracker),
             model_name,
         })
     }
@@ -889,6 +896,9 @@ fn spawn_agent_execution(
                     agent.label.clone(),
                     event_tx.clone(),
                 )));
+            }
+            if let Some(reliability_tracker) = resources.reliability_tracker.clone() {
+                engine = engine.with_reliability_tracker(reliability_tracker);
             }
             let result = engine.execute_task(&task).await;
             let elapsed_ms = start.elapsed().as_millis() as u64;

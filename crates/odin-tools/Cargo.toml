@@ -17,6 +17,7 @@ reqwest.workspace = true
 regex.workspace = true
 rand.workspace = true
 uuid.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile.workspace = true

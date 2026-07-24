@@ -198,15 +198,12 @@ impl Tool for McpToolAdapter {
 /// Map MCP errors to the shared internal error type.
 fn map_mcp_error(tool_name: &str, err: McpError) -> OdinError {
     match err {
-        McpError::Transport(msg) => OdinError::tool(tool_name, format!("Transport error: {msg}")),
-        McpError::Serialization(e) => {
-            OdinError::tool(tool_name, format!("Serialization error: {e}"))
-        }
+        McpError::Transport(msg) | McpError::Connection(msg) => OdinError::Network(msg),
+        McpError::Serialization(e) => OdinError::Validation(format!("Serialization error: {e}")),
         McpError::Protocol { code, message } => {
             OdinError::tool(tool_name, format!("Protocol error ({code}): {message}"))
         }
-        McpError::Connection(msg) => OdinError::tool(tool_name, format!("Connection error: {msg}")),
-        McpError::Timeout(msg) => OdinError::tool(tool_name, format!("Timeout: {msg}")),
+        McpError::Timeout(msg) => OdinError::Timeout(msg),
         McpError::Tool { tool, message } => OdinError::tool(tool, message),
         McpError::InvalidResponse(msg) => {
             OdinError::tool(tool_name, format!("Invalid response: {msg}"))
@@ -407,5 +404,27 @@ mod tests {
         assert!(!adapter.is_safe());
         assert!(adapter.is_dangerous());
         assert!(adapter.requires_approval());
+    }
+
+    #[test]
+    fn test_mcp_failure_classes_are_preserved() {
+        assert!(matches!(
+            map_mcp_error("tool", McpError::Transport("closed".into())),
+            OdinError::Network(_)
+        ));
+        assert!(matches!(
+            map_mcp_error("tool", McpError::Timeout("late".into())),
+            OdinError::Timeout(_)
+        ));
+        assert!(matches!(
+            map_mcp_error(
+                "tool",
+                McpError::Tool {
+                    tool: "tool".into(),
+                    message: "failed".into(),
+                }
+            ),
+            OdinError::Tool { .. }
+        ));
     }
 }

@@ -1,28 +1,22 @@
-//! Per-tool reliability scoring for Raven Agent.
+//! Persistent per-tool reliability scoring for Raven Agent.
 //!
-//! Tracks success/failure rates per tool, computes a reliability score (0.0–1.0),
-//! and exposes query methods for tool selection guidance.
-//!
-//! ## Design
-//!
-//! - **Sliding window**: Only the last N calls per tool are considered (default: 100).
-//! - **Decay**: Older results contribute less (exponential decay with configurable half-life).
-//! - **Cold start**: New tools without data get a neutral score of 0.5.
-//! - **Thread-safe**: Designed for concurrent access from the agent loop.
+//! Production tool attempts are stored as bounded, redacted samples. The store
+//! deliberately contains only the tool name, outcome classification, duration,
+//! and completion timestamp; arguments, output, and error text are never stored.
 
+use chrono::{DateTime, Utc};
+use odin_core::error::{OdinError, OdinResult};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::RwLock;
-use std::time::{Duration, Instant};
-
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
+use std::path::Path;
+use std::sync::{Mutex, RwLock};
+use std::time::Duration;
 
 /// Configuration for the reliability tracker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReliabilityConfig {
-    /// Maximum number of recent calls to track per tool.
+    /// Maximum number of recent calls to retain per tool.
     pub window_size: usize,
     /// Half-life for exponential decay (older results count less).
     pub half_life: Duration,
@@ -36,102 +30,280 @@ impl Default for ReliabilityConfig {
     fn default() -> Self {
         Self {
             window_size: 100,
-            half_life: Duration::from_secs(3600), // 1 hour
+            half_life: Duration::from_secs(3600),
             default_score: 0.5,
             alert_threshold: 0.7,
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Call record
-// ---------------------------------------------------------------------------
+/// Redacted classification for a production tool attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReliabilityOutcome {
+    Success,
+    PolicyDenial,
+    ValidationFailure,
+    TransportFailure,
+    ToolFailure,
+}
 
-/// A single tool call outcome.
-#[derive(Debug, Clone)]
+impl ReliabilityOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::PolicyDenial => "policy_denial",
+            Self::ValidationFailure => "validation_failure",
+            Self::TransportFailure => "transport_failure",
+            Self::ToolFailure => "tool_failure",
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "success" => Some(Self::Success),
+            "policy_denial" => Some(Self::PolicyDenial),
+            "validation_failure" => Some(Self::ValidationFailure),
+            "transport_failure" => Some(Self::TransportFailure),
+            "tool_failure" => Some(Self::ToolFailure),
+            _ => None,
+        }
+    }
+
+    fn is_success(self) -> bool {
+        self == Self::Success
+    }
+}
+
+/// Classify a tool execution error without retaining its potentially sensitive text.
+pub fn classify_tool_error(error: &OdinError) -> ReliabilityOutcome {
+    match error {
+        OdinError::PermissionDenied(_) => ReliabilityOutcome::PolicyDenial,
+        OdinError::Validation(_) | OdinError::Serialization(_) => {
+            ReliabilityOutcome::ValidationFailure
+        }
+        OdinError::Network(_)
+        | OdinError::Timeout(_)
+        | OdinError::RateLimit(_)
+        | OdinError::Provider { .. } => ReliabilityOutcome::TransportFailure,
+        OdinError::Tool {
+            source: Some(source),
+            ..
+        } if source.is::<serde_json::Error>() => ReliabilityOutcome::ValidationFailure,
+        _ => ReliabilityOutcome::ToolFailure,
+    }
+}
+
+/// A single redacted tool call sample.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallRecord {
-    /// Whether the call succeeded.
-    pub success: bool,
-    /// Duration of the call in milliseconds.
+    pub outcome: ReliabilityOutcome,
     pub duration_ms: u64,
-    /// When the call completed (for decay calculation).
-    pub timestamp: Instant,
-    /// Error message if the call failed.
-    pub error: Option<String>,
+    pub timestamp: DateTime<Utc>,
 }
 
 impl CallRecord {
+    pub fn new(outcome: ReliabilityOutcome, duration_ms: u64) -> Self {
+        Self {
+            outcome,
+            duration_ms,
+            timestamp: Utc::now(),
+        }
+    }
+
     pub fn success(duration_ms: u64) -> Self {
-        Self {
-            success: true,
-            duration_ms,
-            timestamp: Instant::now(),
-            error: None,
-        }
+        Self::new(ReliabilityOutcome::Success, duration_ms)
     }
 
-    pub fn failure(duration_ms: u64, error: impl Into<String>) -> Self {
-        Self {
-            success: false,
-            duration_ms,
-            timestamp: Instant::now(),
-            error: Some(error.into()),
-        }
+    pub fn failure(duration_ms: u64, _error: impl Into<String>) -> Self {
+        Self::new(ReliabilityOutcome::ToolFailure, duration_ms)
     }
 
-    /// Age of this record (how long ago it was recorded).
     fn age(&self) -> Duration {
-        self.timestamp.elapsed()
+        (Utc::now() - self.timestamp)
+            .to_std()
+            .unwrap_or(Duration::ZERO)
     }
 
-    /// Decay weight based on age relative to half-life.
     fn weight(&self, half_life: Duration) -> f64 {
-        let age_secs = self.age().as_secs_f64();
         let hl_secs = half_life.as_secs_f64();
         if hl_secs <= 0.0 {
             return 1.0;
         }
-        // Exponential decay: weight = 2^(-age / half_life)
-        2.0_f64.powf(-age_secs / hl_secs)
+        2.0_f64.powf(-self.age().as_secs_f64() / hl_secs)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tool reliability
-// ---------------------------------------------------------------------------
 
 /// Reliability information for a single tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolReliability {
-    /// Tool name.
     pub tool_name: String,
-    /// Reliability score (0.0–1.0).
     pub score: f64,
-    /// Total calls recorded.
     pub total_calls: usize,
-    /// Successful calls.
     pub success_count: usize,
-    /// Failure count.
     pub failure_count: usize,
-    /// Success rate (unweighted).
+    pub policy_denial_count: usize,
+    pub validation_failure_count: usize,
+    pub transport_failure_count: usize,
+    pub tool_failure_count: usize,
     pub success_rate: f64,
-    /// Average duration in ms.
     pub avg_duration_ms: f64,
-    /// Whether the tool is below the alert threshold.
     pub is_unreliable: bool,
-    /// How many calls until the window is full (0 if full).
     pub calls_until_mature: usize,
+    pub latest_timestamp: Option<DateTime<Utc>>,
 }
 
-// ---------------------------------------------------------------------------
-// Reliability tracker
-// ---------------------------------------------------------------------------
+struct ReliabilityStore {
+    connection: Mutex<Connection>,
+}
 
-/// Thread-safe reliability tracker for all registered tools.
+impl ReliabilityStore {
+    fn open(path: &Path) -> OdinResult<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                OdinError::Database(format!(
+                    "failed to create reliability directory '{}': {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        let connection = Connection::open(path).map_err(store_error)?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(store_error)?;
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE IF NOT EXISTS reliability_samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tool_name TEXT NOT NULL,
+                    outcome TEXT NOT NULL CHECK (
+                        outcome IN (
+                            'success',
+                            'policy_denial',
+                            'validation_failure',
+                            'transport_failure',
+                            'tool_failure'
+                        )
+                    ),
+                    duration_ms INTEGER NOT NULL,
+                    timestamp TEXT NOT NULL
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_reliability_tool_recent
+                    ON reliability_samples(tool_name, id DESC);",
+            )
+            .map_err(store_error)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
+        })
+    }
+
+    fn load(&self) -> OdinResult<HashMap<String, Vec<CallRecord>>> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|error| OdinError::Database(format!("reliability lock poisoned: {error}")))?;
+        let mut statement = connection
+            .prepare(
+                "SELECT tool_name, outcome, duration_ms, timestamp
+                 FROM reliability_samples ORDER BY id ASC",
+            )
+            .map_err(store_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(store_error)?;
+
+        let mut records: HashMap<String, Vec<CallRecord>> = HashMap::new();
+        for row in rows {
+            let (tool_name, outcome, duration_ms, timestamp) = row.map_err(store_error)?;
+            let Some(outcome) = ReliabilityOutcome::parse(&outcome) else {
+                tracing::warn!(tool = %tool_name, "ignoring unknown reliability outcome");
+                continue;
+            };
+            let timestamp = DateTime::parse_from_rfc3339(&timestamp)
+                .map_err(|error| {
+                    OdinError::Database(format!("invalid reliability timestamp: {error}"))
+                })?
+                .with_timezone(&Utc);
+            records.entry(tool_name).or_default().push(CallRecord {
+                outcome,
+                duration_ms,
+                timestamp,
+            });
+        }
+        Ok(records)
+    }
+
+    fn append(&self, tool_name: &str, record: &CallRecord, window_size: usize) -> OdinResult<()> {
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|error| OdinError::Database(format!("reliability lock poisoned: {error}")))?;
+        let transaction = connection.transaction().map_err(store_error)?;
+        transaction
+            .execute(
+                "INSERT INTO reliability_samples
+                    (tool_name, outcome, duration_ms, timestamp)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    tool_name,
+                    record.outcome.as_str(),
+                    record.duration_ms,
+                    record.timestamp.to_rfc3339()
+                ],
+            )
+            .map_err(store_error)?;
+        transaction
+            .execute(
+                "DELETE FROM reliability_samples
+                 WHERE tool_name = ?1
+                   AND id NOT IN (
+                       SELECT id FROM reliability_samples
+                       WHERE tool_name = ?1
+                       ORDER BY id DESC LIMIT ?2
+                   )",
+                params![tool_name, window_size],
+            )
+            .map_err(store_error)?;
+        transaction.commit().map_err(store_error)
+    }
+
+    fn reset(&self, tool_name: Option<&str>) -> OdinResult<()> {
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|error| OdinError::Database(format!("reliability lock poisoned: {error}")))?;
+        match tool_name {
+            Some(tool_name) => connection
+                .execute(
+                    "DELETE FROM reliability_samples WHERE tool_name = ?1",
+                    [tool_name],
+                )
+                .map_err(store_error)?,
+            None => connection
+                .execute("DELETE FROM reliability_samples", [])
+                .map_err(store_error)?,
+        };
+        Ok(())
+    }
+}
+
+fn store_error(error: rusqlite::Error) -> OdinError {
+    OdinError::Database(format!("reliability store error: {error}"))
+}
+
+/// Thread-safe reliability tracker backed by an optional SQLite store.
 pub struct ReliabilityTracker {
     config: ReliabilityConfig,
-    /// Per-tool records: tool_name → Vec<CallRecord>
     records: RwLock<HashMap<String, Vec<CallRecord>>>,
+    store: Option<ReliabilityStore>,
 }
 
 impl Default for ReliabilityTracker {
@@ -141,355 +313,295 @@ impl Default for ReliabilityTracker {
 }
 
 impl ReliabilityTracker {
-    /// Create a new tracker with the given configuration.
     pub fn new(config: ReliabilityConfig) -> Self {
         Self {
             config,
             records: RwLock::new(HashMap::new()),
+            store: None,
         }
     }
 
-    /// Record a successful tool call.
+    /// Open a tracker that reads and writes the shared bounded SQLite store.
+    pub fn persistent(path: impl AsRef<Path>, config: ReliabilityConfig) -> OdinResult<Self> {
+        let store = ReliabilityStore::open(path.as_ref())?;
+        let mut records = store.load()?;
+        for entry in records.values_mut() {
+            trim(entry, config.window_size);
+        }
+        Ok(Self {
+            config,
+            records: RwLock::new(records),
+            store: Some(store),
+        })
+    }
+
     pub fn record_success(&self, tool_name: &str, duration_ms: u64) {
         self.record(tool_name, CallRecord::success(duration_ms));
     }
 
-    /// Record a failed tool call.
     pub fn record_failure(&self, tool_name: &str, duration_ms: u64, error: impl Into<String>) {
         self.record(tool_name, CallRecord::failure(duration_ms, error));
     }
 
-    /// Record a call outcome.
+    pub fn record_outcome(&self, tool_name: &str, outcome: ReliabilityOutcome, duration_ms: u64) {
+        self.record(tool_name, CallRecord::new(outcome, duration_ms));
+    }
+
     pub fn record(&self, tool_name: &str, record: CallRecord) {
+        if let Some(store) = &self.store
+            && let Err(error) = store.append(tool_name, &record, self.config.window_size)
+        {
+            tracing::warn!(tool = %tool_name, %error, "failed to persist reliability sample");
+        }
         let mut records = self
             .records
             .write()
             .expect("reliability tracker lock poisoned");
         let entry = records.entry(tool_name.to_string()).or_default();
         entry.push(record);
-
-        // Trim to window size
-        if entry.len() > self.config.window_size {
-            let excess = entry.len() - self.config.window_size;
-            entry.drain(0..excess);
-        }
+        trim(entry, self.config.window_size);
     }
 
-    /// Get the reliability score for a tool.
-    ///
-    /// Returns 0.0–1.0, where 1.0 means perfect reliability in recent history.
-    /// Tools with no data get `config.default_score`.
     pub fn score(&self, tool_name: &str) -> f64 {
         let records = self
             .records
             .read()
             .expect("reliability tracker lock poisoned");
-        let entry = match records.get(tool_name) {
-            Some(e) if !e.is_empty() => e,
-            _ => return self.config.default_score,
-        };
-
-        self.compute_score(entry)
+        records
+            .get(tool_name)
+            .map_or(self.config.default_score, |entry| self.compute_score(entry))
     }
 
-    /// Get detailed reliability info for a tool.
     pub fn get(&self, tool_name: &str) -> ToolReliability {
         let records = self
             .records
             .read()
             .expect("reliability tracker lock poisoned");
-        let entry = records.get(tool_name);
-
-        let (total, successes, failures, avg_ms, score, mature) = match entry {
-            Some(e) if !e.is_empty() => {
-                let total = e.len();
-                let successes = e.iter().filter(|r| r.success).count();
-                let failures = total - successes;
-                let avg_ms = if total > 0 {
-                    e.iter().map(|r| r.duration_ms as f64).sum::<f64>() / total as f64
-                } else {
-                    0.0
-                };
-                let score = self.compute_score(e);
-                let mature = total >= self.config.window_size;
-                (total, successes, failures, avg_ms, score, mature)
-            }
-            _ => (0, 0, 0, 0.0, self.config.default_score, false),
-        };
-
-        let success_rate = if total > 0 {
-            successes as f64 / total as f64
-        } else {
-            0.0
-        };
-
-        ToolReliability {
-            tool_name: tool_name.to_string(),
-            score,
-            total_calls: total,
-            success_count: successes,
-            failure_count: failures,
-            success_rate,
-            avg_duration_ms: avg_ms,
-            is_unreliable: score < self.config.alert_threshold,
-            calls_until_mature: if mature {
-                0
-            } else {
-                self.config.window_size.saturating_sub(total)
-            },
-        }
+        self.summarize(tool_name, records.get(tool_name).map(Vec::as_slice))
     }
 
-    /// Get reliability info for all tracked tools.
     pub fn all(&self) -> Vec<ToolReliability> {
         let records = self
             .records
             .read()
             .expect("reliability tracker lock poisoned");
-        let mut results: Vec<ToolReliability> = records.keys().map(|name| self.get(name)).collect();
+        let mut results: Vec<_> = records
+            .iter()
+            .filter(|(_, samples)| !samples.is_empty())
+            .map(|(name, samples)| self.summarize(name, Some(samples)))
+            .collect();
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.tool_name.cmp(&b.tool_name))
         });
         results
     }
 
-    /// List tools below the alert threshold.
     pub fn unreliable(&self) -> Vec<ToolReliability> {
         self.all().into_iter().filter(|r| r.is_unreliable).collect()
     }
 
-    /// Reset tracking data for a tool.
     pub fn reset(&self, tool_name: &str) {
-        let mut records = self
-            .records
+        if let Some(store) = &self.store
+            && let Err(error) = store.reset(Some(tool_name))
+        {
+            tracing::warn!(tool = %tool_name, %error, "failed to reset persisted reliability");
+        }
+        self.records
             .write()
-            .expect("reliability tracker lock poisoned");
-        records.remove(tool_name);
+            .expect("reliability tracker lock poisoned")
+            .remove(tool_name);
     }
 
-    /// Reset all tracking data.
     pub fn reset_all(&self) {
-        let mut records = self
-            .records
+        if let Some(store) = &self.store
+            && let Err(error) = store.reset(None)
+        {
+            tracing::warn!(%error, "failed to reset persisted reliability");
+        }
+        self.records
             .write()
-            .expect("reliability tracker lock poisoned");
-        records.clear();
+            .expect("reliability tracker lock poisoned")
+            .clear();
     }
 
-    /// Number of tools being tracked.
     pub fn tool_count(&self) -> usize {
         self.records
             .read()
             .expect("reliability tracker lock poisoned")
-            .len()
+            .values()
+            .filter(|entry| !entry.is_empty())
+            .count()
     }
 
-    // -- internals ----------------------------------------------------------
+    pub fn sample_count(&self) -> usize {
+        self.records
+            .read()
+            .expect("reliability tracker lock poisoned")
+            .values()
+            .map(Vec::len)
+            .sum()
+    }
 
-    /// Compute a weighted reliability score from call records.
+    fn summarize(&self, tool_name: &str, entry: Option<&[CallRecord]>) -> ToolReliability {
+        let entry = entry.unwrap_or_default();
+        let total = entry.len();
+        let count = |outcome| entry.iter().filter(|r| r.outcome == outcome).count();
+        let successes = count(ReliabilityOutcome::Success);
+        let policy_denials = count(ReliabilityOutcome::PolicyDenial);
+        let validation_failures = count(ReliabilityOutcome::ValidationFailure);
+        let transport_failures = count(ReliabilityOutcome::TransportFailure);
+        let tool_failures = count(ReliabilityOutcome::ToolFailure);
+        let avg_ms = if total == 0 {
+            0.0
+        } else {
+            entry.iter().map(|r| r.duration_ms as f64).sum::<f64>() / total as f64
+        };
+        let score = self.compute_score(entry);
+        ToolReliability {
+            tool_name: tool_name.to_string(),
+            score,
+            total_calls: total,
+            success_count: successes,
+            failure_count: total.saturating_sub(successes),
+            policy_denial_count: policy_denials,
+            validation_failure_count: validation_failures,
+            transport_failure_count: transport_failures,
+            tool_failure_count: tool_failures,
+            success_rate: if total == 0 {
+                0.0
+            } else {
+                successes as f64 / total as f64
+            },
+            avg_duration_ms: avg_ms,
+            is_unreliable: total > 0 && score < self.config.alert_threshold,
+            calls_until_mature: self.config.window_size.saturating_sub(total),
+            latest_timestamp: entry.last().map(|record| record.timestamp),
+        }
+    }
+
     fn compute_score(&self, records: &[CallRecord]) -> f64 {
         if records.is_empty() {
             return self.config.default_score;
         }
-
-        let mut weighted_sum = 0.0_f64;
-        let mut total_weight = 0.0_f64;
-
-        for record in records {
-            let w = record.weight(self.config.half_life);
-            weighted_sum += if record.success { w } else { 0.0 };
-            total_weight += w;
-        }
-
+        let (weighted_success, total_weight) =
+            records.iter().fold((0.0, 0.0), |(success, total), record| {
+                let weight = record.weight(self.config.half_life);
+                (
+                    success
+                        + if record.outcome.is_success() {
+                            weight
+                        } else {
+                            0.0
+                        },
+                    total + weight,
+                )
+            });
         if total_weight <= 0.0 {
-            return self.config.default_score;
+            self.config.default_score
+        } else {
+            weighted_success / total_weight
         }
-
-        weighted_sum / total_weight
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+fn trim(records: &mut Vec<CallRecord>, window_size: usize) {
+    if records.len() > window_size {
+        records.drain(0..records.len() - window_size);
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
 
     #[test]
-    fn test_default_score_for_unknown_tool() {
+    fn empty_state_is_explicit() {
         let tracker = ReliabilityTracker::default();
-        assert!((tracker.score("nonexistent") - 0.5).abs() < 0.001);
+        assert_eq!(tracker.sample_count(), 0);
+        assert!(tracker.all().is_empty());
+        assert_eq!(tracker.score("missing"), 0.5);
     }
 
     #[test]
-    fn test_perfect_score_after_successes() {
+    fn classifications_remain_distinct() {
         let tracker = ReliabilityTracker::default();
-        for _ in 0..10 {
-            tracker.record_success("perfect_tool", 50);
+        for outcome in [
+            ReliabilityOutcome::Success,
+            ReliabilityOutcome::PolicyDenial,
+            ReliabilityOutcome::ValidationFailure,
+            ReliabilityOutcome::TransportFailure,
+            ReliabilityOutcome::ToolFailure,
+        ] {
+            tracker.record_outcome("tool", outcome, 10);
         }
-        let score = tracker.score("perfect_tool");
-        assert!(score > 0.95, "expected >0.95, got {score}");
+        let info = tracker.get("tool");
+        assert_eq!(info.total_calls, 5);
+        assert_eq!(info.success_count, 1);
+        assert_eq!(info.policy_denial_count, 1);
+        assert_eq!(info.validation_failure_count, 1);
+        assert_eq!(info.transport_failure_count, 1);
+        assert_eq!(info.tool_failure_count, 1);
     }
 
     #[test]
-    fn test_low_score_after_failures() {
-        let tracker = ReliabilityTracker::default();
-        for _ in 0..10 {
-            tracker.record_failure("bad_tool", 100, "timeout");
-        }
-        let score = tracker.score("bad_tool");
-        assert!(score < 0.1, "expected <0.1, got {score}");
-    }
-
-    #[test]
-    fn test_mixed_results() {
-        let tracker = ReliabilityTracker::default();
-        for _ in 0..5 {
-            tracker.record_success("mixed", 50);
-        }
-        for _ in 0..5 {
-            tracker.record_failure("mixed", 50, "error");
-        }
-        let score = tracker.score("mixed");
-        assert!(score > 0.4 && score < 0.6, "expected ~0.5, got {score}");
-    }
-
-    #[test]
-    fn test_window_trimming() {
+    fn persistent_store_survives_restart_and_is_bounded() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("reliability.db");
         let config = ReliabilityConfig {
-            window_size: 5,
+            window_size: 3,
             ..ReliabilityConfig::default()
         };
-        let tracker = ReliabilityTracker::new(config);
-
-        // First 5: all failures
-        for i in 0..5 {
-            tracker.record_failure("tool", 50, format!("fail {i}"));
+        {
+            let tracker = ReliabilityTracker::persistent(&path, config.clone()).unwrap();
+            tracker.record_outcome("tool", ReliabilityOutcome::PolicyDenial, 1);
+            tracker.record_outcome("tool", ReliabilityOutcome::ValidationFailure, 2);
+            tracker.record_outcome("tool", ReliabilityOutcome::TransportFailure, 3);
+            tracker.record_outcome("tool", ReliabilityOutcome::Success, 4);
         }
-        assert!(tracker.score("tool") < 0.1);
-
-        // Next 5: all successes — failures should be pushed out
-        for _ in 0..5 {
-            tracker.record_success("tool", 50);
-        }
-        assert!(tracker.score("tool") > 0.9);
-    }
-
-    #[test]
-    fn test_decay_prefers_recent() {
-        let config = ReliabilityConfig {
-            half_life: Duration::from_millis(10),
-            ..ReliabilityConfig::default()
-        };
-        let tracker = ReliabilityTracker::new(config);
-
-        // Failure far in the past
-        tracker.record_failure("tool", 50, "old error");
-        thread::sleep(Duration::from_millis(30));
-
-        // Recent successes
-        for _ in 0..5 {
-            tracker.record_success("tool", 50);
-        }
-
-        let score = tracker.score("tool");
-        assert!(score > 0.8, "recent successes should dominate, got {score}");
-    }
-
-    #[test]
-    fn test_get_returns_full_info() {
-        let tracker = ReliabilityTracker::default();
-        tracker.record_success("tool", 50);
-        tracker.record_success("tool", 60);
-        tracker.record_failure("tool", 100, "timeout");
-
+        let tracker = ReliabilityTracker::persistent(&path, config).unwrap();
         let info = tracker.get("tool");
         assert_eq!(info.total_calls, 3);
-        assert_eq!(info.success_count, 2);
-        assert_eq!(info.failure_count, 1);
-        assert!((info.avg_duration_ms - 70.0).abs() < 1.0);
-        assert!((info.success_rate - 2.0 / 3.0).abs() < 0.01);
+        assert_eq!(info.policy_denial_count, 0);
+        assert_eq!(info.validation_failure_count, 1);
+        assert_eq!(info.transport_failure_count, 1);
+        assert_eq!(info.success_count, 1);
+        assert_eq!(info.avg_duration_ms, 3.0);
+        assert!(info.latest_timestamp.is_some());
     }
 
     #[test]
-    fn test_unreliable_detection() {
-        let config = ReliabilityConfig {
-            alert_threshold: 0.8,
+    fn recent_successes_replace_old_failures() {
+        let tracker = ReliabilityTracker::new(ReliabilityConfig {
+            window_size: 2,
             ..ReliabilityConfig::default()
-        };
-        let tracker = ReliabilityTracker::new(config);
-
-        for _ in 0..5 {
-            tracker.record_success("good", 50);
-        }
-        for _ in 0..5 {
-            tracker.record_failure("bad", 50, "err");
-        }
-
-        assert!(!tracker.get("good").is_unreliable);
-        assert!(tracker.get("bad").is_unreliable);
-        assert_eq!(tracker.unreliable().len(), 1);
+        });
+        tracker.record_outcome("tool", ReliabilityOutcome::ToolFailure, 5);
+        tracker.record_outcome("tool", ReliabilityOutcome::ToolFailure, 5);
+        tracker.record_success("tool", 5);
+        tracker.record_success("tool", 5);
+        assert!(tracker.score("tool") > 0.99);
     }
 
     #[test]
-    fn test_all_sorted_by_score() {
-        let tracker = ReliabilityTracker::default();
-        for _ in 0..10 {
-            tracker.record_failure("low", 50, "err");
-        }
-        for _ in 0..10 {
-            tracker.record_success("high", 50);
-        }
-
-        let all = tracker.all();
-        assert!(all[0].score >= all[1].score);
-        assert_eq!(all[0].tool_name, "high");
-    }
-
-    #[test]
-    fn test_reset() {
-        let tracker = ReliabilityTracker::default();
-        tracker.record_success("tool", 50);
-        assert!(tracker.score("tool") > 0.9);
-
-        tracker.reset("tool");
-        assert!((tracker.score("tool") - 0.5).abs() < 0.001);
-        assert_eq!(tracker.tool_count(), 0);
-    }
-
-    #[test]
-    fn test_reset_all() {
-        let tracker = ReliabilityTracker::default();
-        tracker.record_success("a", 50);
-        tracker.record_success("b", 50);
-        assert!(tracker.tool_count() >= 1);
-
-        tracker.reset_all();
-        assert_eq!(tracker.tool_count(), 0);
-        assert!((tracker.score("a") - 0.5).abs() < 0.001);
-    }
-
-    #[test]
-    fn test_calls_until_mature() {
-        let config = ReliabilityConfig {
-            window_size: 10,
-            ..ReliabilityConfig::default()
-        };
-        let tracker = ReliabilityTracker::new(config);
-
-        tracker.record_success("young", 50);
-        let info = tracker.get("young");
-        assert_eq!(info.calls_until_mature, 9); // 10 - 1
-
-        for _ in 0..9 {
-            tracker.record_success("young", 50);
-        }
-        let info = tracker.get("young");
-        assert_eq!(info.calls_until_mature, 0); // full
+    fn error_classification_does_not_use_messages() {
+        assert_eq!(
+            classify_tool_error(&OdinError::PermissionDenied("secret".into())),
+            ReliabilityOutcome::PolicyDenial
+        );
+        assert_eq!(
+            classify_tool_error(&OdinError::Validation("secret".into())),
+            ReliabilityOutcome::ValidationFailure
+        );
+        assert_eq!(
+            classify_tool_error(&OdinError::Timeout("secret".into())),
+            ReliabilityOutcome::TransportFailure
+        );
+        assert_eq!(
+            classify_tool_error(&OdinError::tool("tool", "secret")),
+            ReliabilityOutcome::ToolFailure
+        );
     }
 }

@@ -176,6 +176,7 @@ More detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 - Unknown MCP tools are unsafe and approval-required by default.
 - Tool results, TUI logs, configuration display, and audit entries redact supported secret and PII patterns.
 - Audit redaction cannot be disabled, including by legacy **mask_secrets: false** configuration.
+- Real (non-dry-run) tool attempts persist only their outcome class, duration, and timestamp in the bounded **reliability.db** store under the configured data directory. CLI and TUI reliability views share this store.
 
 ## Known limitations
 

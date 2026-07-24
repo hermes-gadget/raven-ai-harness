@@ -627,32 +627,52 @@ fn render_tools_view(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let items: Vec<ListItem> = app
+    let mut items: Vec<ListItem> = Vec::new();
+    if app
         .tool_displays
         .iter()
-        .map(|t| {
-            let (mark, color) = if t.is_dangerous {
-                ("[!]", RED)
-            } else {
-                ("[v]", GREEN)
-            };
-            let rel = t
-                .reliability
-                .map(|r| format!(" {:.0}%", r * 100.0))
-                .unwrap_or_default();
-            ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{} ", mark),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    &t.name,
-                    Style::default().fg(FG).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(rel, Style::default().fg(MUTED)),
-            ]))
-        })
-        .collect();
+        .all(|tool| tool.reliability.is_none())
+    {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "No persisted reliability samples.",
+            Style::default().fg(MUTED),
+        ))));
+    }
+    items.extend(app.tool_displays.iter().map(|t| {
+        let (mark, color) = if t.is_dangerous {
+            ("[!]", RED)
+        } else {
+            ("[v]", GREEN)
+        };
+        let rel = t
+            .reliability
+            .as_ref()
+            .map(|r| {
+                format!(
+                    " {:.0}% n={} s{} p{} v{} x{} t{} {:.0}ms",
+                    r.score * 100.0,
+                    r.total_calls,
+                    r.success_count,
+                    r.policy_denial_count,
+                    r.validation_failure_count,
+                    r.transport_failure_count,
+                    r.tool_failure_count,
+                    r.avg_duration_ms,
+                )
+            })
+            .unwrap_or_default();
+        ListItem::new(Line::from(vec![
+            Span::styled(
+                format!("{} ", mark),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                &t.name,
+                Style::default().fg(FG).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(rel, Style::default().fg(MUTED)),
+        ]))
+    }));
 
     frame.render_widget(List::new(items), inner);
 }

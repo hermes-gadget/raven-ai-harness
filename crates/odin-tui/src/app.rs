@@ -216,7 +216,7 @@ pub struct ToolDisplay {
     pub category: String,
     pub tags: Vec<String>,
     pub is_dangerous: bool,
-    pub reliability: Option<f64>,
+    pub reliability: Option<odin_tools::ToolReliability>,
 }
 
 #[derive(Debug, Clone)]
@@ -352,23 +352,53 @@ impl App {
             std::sync::Arc::new(odin_tools::Sandbox::default()),
             None,
         )?;
+        let display_config = load_display_config().ok();
+        let reliability_tracker = display_config.as_ref().and_then(|config| {
+            let path = configured_data_dir(config).join("reliability.db");
+            odin_tools::ReliabilityTracker::persistent(
+                path,
+                odin_tools::ReliabilityConfig::default(),
+            )
+            .ok()
+        });
         let catalog = odin_tools::ToolCatalog::from_registry(&registry);
         let mut tools: Vec<ToolDisplay> = catalog
             .by_name
             .into_values()
-            .map(|tool| ToolDisplay {
-                name: tool.name,
-                description: tool.description,
-                category: tool.category,
-                tags: tool.tags,
-                is_dangerous: tool.is_dangerous,
-                reliability: None,
+            .map(|tool| {
+                let reliability = reliability_tracker.as_ref().and_then(|tracker| {
+                    let info = tracker.get(&tool.name);
+                    (info.total_calls > 0).then_some(info)
+                });
+                ToolDisplay {
+                    name: tool.name,
+                    description: tool.description,
+                    category: tool.category,
+                    tags: tool.tags,
+                    is_dangerous: tool.is_dangerous,
+                    reliability,
+                }
             })
             .collect();
+        if let Some(tracker) = &reliability_tracker {
+            for reliability in tracker.all() {
+                if tools.iter().any(|tool| tool.name == reliability.tool_name) {
+                    continue;
+                }
+                tools.push(ToolDisplay {
+                    name: reliability.tool_name.clone(),
+                    description: "Observed external tool".into(),
+                    category: "observed".into(),
+                    tags: vec!["observed".into()],
+                    is_dangerous: false,
+                    reliability: Some(reliability),
+                });
+            }
+        }
         tools.sort_by(|a, b| a.name.cmp(&b.name));
         app.tool_displays = tools;
 
-        if let Ok(config) = load_display_config() {
+        if let Some(config) = display_config {
             app.provider_name = config.models.default_provider.clone();
             app.model_name = config
                 .models
@@ -1546,6 +1576,13 @@ fn load_display_config() -> Result<odin_core::config::OdinConfig> {
         }
     }
     Ok(odin_core::config::OdinConfig::default())
+}
+
+fn configured_data_dir(config: &odin_core::config::OdinConfig) -> PathBuf {
+    config.general.data_dir.as_ref().map_or_else(
+        || PathBuf::from(shellexpand::tilde("~/.raven-agent").to_string()),
+        |path| PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).to_string()),
+    )
 }
 
 fn spinner_frame(elapsed: Duration) -> &'static str {
