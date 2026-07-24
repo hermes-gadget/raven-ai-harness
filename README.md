@@ -91,6 +91,8 @@ MCP tools are treated as unsafe and approval-required by default. A server can o
 | **raven orchestrate agents / locks / queue / restore** | Inspect persisted orchestration data |
 | **raven serve** | Start the HTTP API; WebSocket upgrades are served at **/ws** |
 | **raven schedule add / list / remove / enable / disable** | Manage SQLite-backed scheduled job definitions |
+| **raven schedule host** | Continuously execute due jobs with the configured Runtime until shutdown |
+| **raven schedule status / history** | Report scheduler configuration, job health, and durable outcomes |
 | **raven tools list / inspect / validate / doctor / catalog / reliability** | Inspect the built-in tool system |
 | **raven tools test &lt;name&gt; --dry-run** | Validate a tool call without executing it |
 | **raven tools test &lt;name&gt; --args &lt;json&gt; --approve** | Explicitly approve direct execution of a dangerous tool |
@@ -183,7 +185,7 @@ More detail: [ARCHITECTURE.md](ARCHITECTURE.md).
 - The HTTP and Discord orchestration submission endpoints create persisted plans. Task execution is available through **raven run**, HTTP **/chat**, and Discord **/raven run**.
 - **raven serve** also starts Discord when **gateway.discord_enabled** is true and a token is available from the configured value or environment variable.
 - The model loop still has no general interactive tool-call approval responder. The TUI currently approval-gates dangerous TUI actions such as cancellation; approval-required tool calls are denied unless policy explicitly allows them or approval requirements are disabled for a trusted environment.
-- Scheduler definitions persist, but a separate long-running scheduler process is required to execute due jobs continuously.
+- Scheduler hosting is a separate process; run **raven schedule host** (normally under a service manager) when `scheduler.enabled` is true.
 - WebSocket clients receive task/orchestration events, but inbound pause/resume/cancel control messages are not dispatched.
 - Memory is attached to the direct runtime path; orchestrated sub-agent memory retrieval is not yet integrated.
 
